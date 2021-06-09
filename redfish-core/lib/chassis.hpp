@@ -387,6 +387,12 @@ inline void
             asyncResp->res.jsonValue["PCIeDevices"]["@odata.id"] =
                 "/redfish/v1/Systems/system/PCIeDevices";
 
+#ifdef BMCWEB_ENABLE_REDFISH_CHASSIS_LOG_ENTRIES
+            asyncResp->res.jsonValue["LogServices"]["@odata.id"] =
+                crow::utility::urlFromPieces("redfish", "v1", "Chassis",
+                                             chassisId, "LogServices");
+#endif
+
             sdbusplus::asio::getProperty<std::vector<std::string>>(
                 *crow::connections::systemBus,
                 "xyz.openbmc_project.ObjectMapper", path + "/drive",
@@ -544,9 +550,9 @@ inline void
                 else if (interface ==
                          "xyz.openbmc_project.Inventory.Decorator.LocationCode")
                 {
-                    location_util::getLocationCode(
-                        asyncResp, connectionName, path,
-                        "/Location"_json_pointer);
+                    location_util::getLocationCode(asyncResp, connectionName,
+                                                   path,
+                                                   "/Location"_json_pointer);
                 }
                 else if (location_util::isConnector(interface))
                 {
@@ -560,8 +566,8 @@ inline void
                         continue;
                     }
 
-                    asyncResp->res.jsonValue["Location"]["PartLocation"]
-                                            ["LocationType"] =
+                    asyncResp->res
+                        .jsonValue["Location"]["PartLocation"]["LocationType"] =
                         *locationType;
                 }
             }
