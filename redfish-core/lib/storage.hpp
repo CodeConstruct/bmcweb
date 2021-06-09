@@ -26,6 +26,7 @@
 #include <sdbusplus/unpack_properties.hpp>
 #include <utils/dbus_utils.hpp>
 #include <utils/location_utils.hpp>
+#include <utils/log_utils.hpp>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -395,6 +396,10 @@ inline void getStorageControllersWithAssociation(
             subHealth->inventory.emplace_back(path);
             health->inventory.emplace_back(path);
             health->children.emplace_back(subHealth);
+            log_utils::getChassisLogEntry(
+                asyncResp,
+                "/StorageControllers"_json_pointer / count / "Status", path,
+                "OpenBMC.0.2.0.StorageControllerError");
             count++;
         }
         });
