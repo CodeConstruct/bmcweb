@@ -829,6 +829,37 @@ inline static void
     }
 }
 
+inline std::optional<std::string>
+    softwareVersionPurpose(const std::string& purpose)
+{
+    if (purpose ==
+        "xyz.openbmc_project.Software.Version.VersionPurpose.Unknown")
+    {
+        return "Unknown";
+    }
+    if (purpose == "xyz.openbmc_project.Software.Version.VersionPurpose.Other")
+    {
+        return "Other";
+    }
+    if (purpose == "xyz.openbmc_project.Software.Version.VersionPurpose.System")
+    {
+        return "System";
+    }
+    if (purpose == "xyz.openbmc_project.Software.Version.VersionPurpose.BMC")
+    {
+        return "BMC";
+    }
+    if (purpose == "xyz.openbmc_project.Software.Version.VersionPurpose.Host")
+    {
+        return "Host";
+    }
+    if (purpose == "xyz.openbmc_project.Software.Version.VersionPurpose.PSU")
+    {
+        return "PSU";
+    }
+    return std::nullopt;
+}
+
 inline void
     getSoftwareVersion(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                        const std::string& service, const std::string& path,
@@ -919,10 +950,12 @@ inline void requestRoutesSoftwareInventory(App& app)
         asyncResp->res.jsonValue["@odata.id"] = crow::utility::urlFromPieces(
             "redfish", "v1", "UpdateService", "FirmwareInventory", *swId);
 
-        constexpr std::array<std::string_view, 1> interfaces = {
-            "xyz.openbmc_project.Software.Version"};
+        constexpr std::array<std::string_view, 2> interfaces = {
+            "xyz.openbmc_project.Software.Version",
+            "xyz.openbmc_project.Software.Activation",
+        };
         dbus::utility::getSubTree(
-            "/", 0, interfaces,
+            "/xyz/openbmc_project/software", 0, interfaces,
             [asyncResp,
              swId](const boost::system::error_code& ec,
                    const dbus::utility::MapperGetSubTreeResponse& subtree) {
@@ -944,16 +977,29 @@ inline void requestRoutesSoftwareInventory(App& app)
                 {
                     continue;
                 }
-
                 if (obj.second.empty())
                 {
                     continue;
                 }
 
                 found = true;
-                sw_util::getSwStatus(asyncResp, swId, obj.second[0].first);
-                getSoftwareVersion(asyncResp, obj.second[0].first, obj.first,
-                                   *swId);
+                for (const auto& [serviceName, interfaceList] : obj.second)
+                {
+                    for (const std::string& interface : interfaceList)
+                    {
+                        if (interface == "xyz.openbmc_project.Software.Version")
+                        {
+                            found = true;
+                            getSoftwareVersion(asyncResp, serviceName,
+                                               obj.first, *swId);
+                        }
+                        if (interface ==
+                            "xyz.openbmc_project.Software.Activation")
+                        {
+                            sw_util::getSwStatus(asyncResp, swId, serviceName);
+                        }
+                    }
+                }
             }
             if (!found)
             {
