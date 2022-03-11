@@ -272,6 +272,124 @@ inline void requestRoutesManagerResetActionInfo(App& app)
         });
 }
 
+/**
+ * ManagerFanModeChangeAction class supports POST method for Fan Mode Change
+ * action.
+ */
+inline void requestRoutesManagerFanModeChangeAction(App& app)
+{
+
+    /**
+     * Function handles FanMode POST method request.
+     *
+     * OpenBMC only supports FanMode "Manual" or "Auto".
+     */
+
+    BMCWEB_ROUTE(app,
+                 "/redfish/v1/Managers/bmc/Actions/Manager.FanMode.Change/")
+        .privileges(redfish::privileges::postManager)
+        .methods(boost::beast::http::verb::post)(
+            [](const crow::Request& req,
+               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp) {
+        std::string fanMode;
+        if (!json_util::readJsonAction(req, asyncResp->res, "FanMode", fanMode))
+        {
+            messages::actionParameterUnknown(asyncResp->res, "FanMode", "");
+            return;
+        }
+
+        bool munualMode;
+        if (fanMode == "Manual")
+        {
+            munualMode = true;
+        }
+        else if (fanMode == "Auto")
+        {
+            munualMode = false;
+        }
+        else
+        {
+            messages::actionParameterValueFormatError(asyncResp->res, "Manual",
+                                                      "Auto", "");
+            return;
+        }
+
+        crow::connections::systemBus->async_method_call(
+            [asyncResp{std::move(asyncResp)}, munualMode](
+                const boost::system::error_code ec,
+                const std::vector<std::pair<
+                    std::string, std::vector<std::pair<
+                                     std::string, std::vector<std::string>>>>>&
+                    subtree) {
+            if (ec)
+            {
+                BMCWEB_LOG_ERROR << "fanctrl GetSubTree failed "
+                                 << " ec = ( " << ec << " )\n";
+                messages::internalError(asyncResp->res);
+                return;
+            }
+
+            for (const auto& object : subtree)
+            {
+                auto iter = object.first.rfind('/');
+                if ((iter != std::string::npos) && (iter < object.first.size()))
+                {
+                    std::string objName = object.first.substr(iter + 1);
+                    crow::connections::systemBus->async_method_call(
+                        [asyncResp, objName,
+                         munualMode](const boost::system::error_code ec2) {
+                        if (ec2)
+                        {
+                            BMCWEB_LOG_ERROR << "Updated the Mode failed "
+                                             << objName << ": " << munualMode
+                                             << " ec = ( " << ec2 << " )\n";
+                            messages::internalError(asyncResp->res);
+                            return;
+                        }
+                        },
+                        "xyz.openbmc_project.State.FanCtrl",
+                        "/xyz/openbmc_project/settings/fanctrl/" + objName,
+                        "org.freedesktop.DBus.Properties", "Set",
+                        "xyz.openbmc_project.Control.Mode", "Manual",
+                        std::variant<bool>(munualMode));
+                    BMCWEB_LOG_DEBUG << "Updated the Mode success " << objName
+                                     << ": " << munualMode;
+                }
+            }
+            messages::success(asyncResp->res);
+            },
+            "xyz.openbmc_project.ObjectMapper",
+            "/xyz/openbmc_project/object_mapper",
+            "xyz.openbmc_project.ObjectMapper", "GetSubTree",
+            "/xyz/openbmc_project/settings/fanctrl", 1,
+            std::array<const char*, 1>{"xyz.openbmc_project.Control.Mode"});
+        });
+}
+
+/**
+ * ManagerFanModeChangeActionInfo derived class for delivering Manager
+ * FanMode AllowableValues using FanModeInfo schema.
+ */
+inline void requestRoutesManagerFanModeChangeActionInfo(App& app)
+{
+    BMCWEB_ROUTE(app, "/redfish/v1/Managers/bmc/FanMode.Change.ActionInfo/")
+        .privileges(redfish::privileges::getActionInfo)
+        .methods(boost::beast::http::verb::get)(
+            [](const crow::Request&,
+               const std::shared_ptr<bmcweb::AsyncResp>& asyncResp) {
+        asyncResp->res.jsonValue = {
+            {"@odata.type", "#ActionInfo.v1_1_2.ActionInfo"},
+            {"@odata.id", "/redfish/v1/Managers/bmc/FanMode.Change.ActionInfo"},
+            {"Name", "FanMode Change Action Info"},
+            {"Id", "FanMode.Change.ActionInfo"},
+            {"Parameters",
+             {{{"Name", "FanMode"},
+               {"Required", true},
+               {"DataType", "String"},
+               {"AllowableValues", {"Manual", "Auto"}}}}}};
+        });
+}
+
 static constexpr const char* objectManagerIface =
     "org.freedesktop.DBus.ObjectManager";
 static constexpr const char* pidConfigurationIface =
@@ -414,6 +532,56 @@ inline void
                     zone["@odata.id"] = std::move(url);
                     zone["@odata.type"] = "#OemManager.FanZone";
                     config = &zone;
+                }
+
+                // Add FanMode status
+                std::size_t found = name.find("_"); // Zone_0, Zone_1, ...
+                std::string zone_index = "";
+                if (found != std::string::npos)
+                {
+                    zone_index = name.substr(found + 1);
+                }
+
+                if (name.starts_with("Zone") && zone_index != "")
+                {
+                    crow::connections::systemBus->async_method_call(
+                        [asyncResp, name](const boost::system::error_code ec2,
+                                          std::variant<bool>& manualEnabled) {
+                        if (ec2)
+                        {
+                            BMCWEB_LOG_ERROR << "Get the FanMode failed "
+                                             << name << " ec = ( " << ec2
+                                             << " )\n";
+                            messages::internalError(asyncResp->res);
+                            return;
+                        }
+                        const bool* manualEnabledPtr =
+                            std::get_if<bool>(&manualEnabled);
+                        if (manualEnabledPtr == nullptr)
+                        {
+                            BMCWEB_LOG_ERROR
+                                << "Get the FanMode manualEnabled null";
+                            messages::internalError(asyncResp->res);
+                            return;
+                        }
+                        if (*manualEnabledPtr == true)
+                        {
+                            asyncResp->res
+                                .jsonValue["Oem"]["OpenBmc"]["Fan"]["FanZones"]
+                                          [name]["FanMode"] = "Manual";
+                        }
+                        else
+                        {
+                            asyncResp->res
+                                .jsonValue["Oem"]["OpenBmc"]["Fan"]["FanZones"]
+                                          [name]["FanMode"] = "Auto";
+                        }
+                        },
+                        "xyz.openbmc_project.State.FanCtrl",
+                        "/xyz/openbmc_project/settings/fanctrl/zone" +
+                            zone_index,
+                        "org.freedesktop.DBus.Properties", "Get",
+                        "xyz.openbmc_project.Control.Mode", "Manual");
                 }
 
                 else if (intfPair.first == stepwiseConfigurationIface)
@@ -1939,6 +2107,13 @@ inline void requestRoutesManager(App& app)
             "/redfish/v1/Managers/bmc/Actions/Manager.ResetToDefaults";
         resetToDefaults["ResetType@Redfish.AllowableValues"] =
             nlohmann::json::array_t({"ResetAll"});
+
+        nlohmann::json& fanModeChange =
+            asyncResp->res.jsonValue["Actions"]["#Manager.FanMode.Change"];
+        fanModeChange["target"] =
+            "/redfish/v1/Managers/bmc/Actions/Manager.FanMode.Change";
+        fanModeChange["@Redfish.ActionInfo"] =
+            "/redfish/v1/Managers/bmc/FanMode.Change.ActionInfo";
 
         std::pair<std::string, std::string> redfishDateTimeOffset =
             redfish::time_utils::getDateTimeOffsetNow();

@@ -235,6 +235,9 @@ class RedfishService
         requestRoutesTriggerCollection(app);
         requestRoutesTrigger(app);
 
+        requestRoutesManagerFanModeChangeActionInfo(app);
+        requestRoutesManagerFanModeChangeAction(app);
+
         // Note, this must be the last route registered
         requestRoutesRedfish(app);
     }
