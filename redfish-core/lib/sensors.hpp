@@ -1481,6 +1481,15 @@ inline void storeInventoryItemData(
                                              inventoryItem.name)
                     .string());
         }
+
+        if (interface == "xyz.openbmc_project.Inventory.Item.Dimm")
+        {
+            inventoryItem.relatedItemIds.emplace_back(
+                crow::utility::urlFromPieces("redfish", "v1", "Systems",
+                                             "system", "Memory",
+                                             inventoryItem.name)
+                    .string());
+        }
     }
 }
 
@@ -1629,6 +1638,7 @@ static void getInventoryItemsConnections(
         "xyz.openbmc_project.Inventory.Decorator.Asset",
         "xyz.openbmc_project.State.Decorator.OperationalStatus",
         "xyz.openbmc_project.Inventory.Item.Cpu",
+        "xyz.openbmc_project.Inventory.Item.Dimm",
     });
 
     // Response handler for parsing output from GetSubTree
