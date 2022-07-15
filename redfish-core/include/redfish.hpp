@@ -16,6 +16,7 @@
 #pragma once
 
 #include "account_service.hpp"
+#include "assembly.hpp"
 #include "bios.hpp"
 #include "cable.hpp"
 #include "certificate_service.hpp"
@@ -92,6 +93,7 @@ class RedfishService
         requestRoutesChassis(app);
         requestRoutesChassisResetAction(app);
         requestRoutesChassisResetActionInfo(app);
+        requestRoutesChassisAssembly(app);
         requestRoutesChassisDrive(app);
         requestRoutesChassisDriveName(app);
         requestRoutesUpdateService(app);
