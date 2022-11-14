@@ -1056,6 +1056,34 @@ inline void patchAppliedOperatingConfig(
         "AppliedConfig", dbus::utility::DbusVariantType(std::move(configPath)));
 }
 
+inline void handleProcessorHead(crow::App& app, const crow::Request& req,
+                                const std::shared_ptr<bmcweb::AsyncResp>& aResp,
+                                const std::string& /* systemName */,
+                                const std::string& /* processorId */)
+{
+    if (!redfish::setUpRedfishRoute(app, req, aResp))
+    {
+        return;
+    }
+    aResp->res.addHeader(
+        boost::beast::http::field::link,
+        "</redfish/v1/JsonSchemas/Processor/Processor.json>; rel=describedby");
+}
+
+inline void handleProcessorCollectionHead(
+    crow::App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& aResp,
+    const std::string& /* systemName */)
+{
+    if (!redfish::setUpRedfishRoute(app, req, aResp))
+    {
+        return;
+    }
+    aResp->res.addHeader(
+        boost::beast::http::field::link,
+        "</redfish/v1/JsonSchemas/ProcessorCollection/ProcessorCollection.json>; rel=describedby");
+}
+
 inline void requestRoutesOperatingConfigCollection(App& app)
 {
 
@@ -1188,6 +1216,11 @@ inline void requestRoutesProcessorCollection(App& app)
      * Functions triggers appropriate requests on DBus
      */
     BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Processors/")
+        .privileges(redfish::privileges::headProcessorCollection)
+        .methods(boost::beast::http::verb::head)(
+            std::bind_front(handleProcessorCollectionHead, std::ref(app)));
+
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Processors/")
         .privileges(redfish::privileges::getProcessorCollection)
         .methods(boost::beast::http::verb::get)(
             [&app](const crow::Request& req,
@@ -1204,6 +1237,9 @@ inline void requestRoutesProcessorCollection(App& app)
             return;
         }
 
+        asyncResp->res.addHeader(
+            boost::beast::http::field::link,
+            "</redfish/v1/JsonSchemas/ProcessorCollection/ProcessorCollection.json>; rel=describedby");
         asyncResp->res.jsonValue["@odata.type"] =
             "#ProcessorCollection.ProcessorCollection";
         asyncResp->res.jsonValue["Name"] = "Processor Collection";
@@ -1224,6 +1260,10 @@ inline void requestRoutesProcessor(App& app)
     /**
      * Functions triggers appropriate requests on DBus
      */
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Processors/<str>/")
+        .privileges(redfish::privileges::headProcessor)
+        .methods(boost::beast::http::verb::head)(
+            std::bind_front(handleProcessorHead, std::ref(app)));
 
     BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Processors/<str>/")
         .privileges(redfish::privileges::getProcessor)
@@ -1243,6 +1283,9 @@ inline void requestRoutesProcessor(App& app)
             return;
         }
 
+        asyncResp->res.addHeader(
+            boost::beast::http::field::link,
+            "</redfish/v1/JsonSchemas/Processor/Processor.json>; rel=describedby");
         asyncResp->res.jsonValue["@odata.type"] =
             "#Processor.v1_11_0.Processor";
         asyncResp->res.jsonValue["@odata.id"] =
