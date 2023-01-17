@@ -1343,10 +1343,135 @@ inline void getStorageControllerLocation(
     }
 }
 
+// TODO(matt): could move to dbus_utility.hpp
+inline std::optional<std::string>
+    matchServiceName(const dbus::utility::MapperServiceMap& allServices,
+                     const std::string& matchIface)
+{
+    // TODO(matt): assumes only a single service matches
+    for (const auto& [service, interfaces] : allServices)
+    {
+        for (const auto& interface : interfaces)
+        {
+            if (interface == matchIface)
+            {
+                return service;
+            }
+        }
+    }
+    return {};
+}
+
+inline void tryPopulateControllerNvme(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& path, const dbus::utility::MapperServiceMap& ifaces)
+{
+    if (!matchServiceName(ifaces, "xyz.openbmc_project.NVMe.NVMeAdmin"))
+    {
+        return;
+    }
+
+    auto& nvprop = asyncResp->res.jsonValue["NVMeControllerProperties"];
+    // TODO(matt) fetch other properties, don't use hardcoded values
+    nvprop["ControllerType"] = "IO";
+    nvprop["NVMeVersion"] = "1.4";
+    (void)path;
+}
+
+ // Finds a controller and runs a callback
+                inline void
+    findStorageController(
+        const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+        const std::string& storageId, const std::string& controllerId,
+        const std::function<
+            void(const std::string& path,
+                 const dbus::utility::MapperServiceMap& ifaces)>& cb)
+{
+    // Find storage
+    crow::connections::systemBus->async_method_call(
+        [asyncResp, storageId, controllerId,
+         cb](const boost::system::error_code ec,
+             const dbus::utility::MapperGetSubTreeResponse& subtree) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG
+                << "requestRoutesStorageController DBUS response error";
+            messages::resourceNotFound(
+                asyncResp->res, "#StorageController.v1_6_0.StorageController",
+                controllerId);
+            return;
+        }
+
+        auto storage = std::find_if(
+            subtree.begin(), subtree.end(),
+            [&storageId](
+                const std::pair<std::string, dbus::utility::MapperServiceMap>&
+                    object) {
+            return sdbusplus::message::object_path(object.first).filename() ==
+                   storageId;
+            });
+        if (storage == subtree.end())
+        {
+            messages::resourceNotFound(asyncResp->res,
+                                       "#Storage.v1_9_1.Storage", storageId);
+            return;
+        }
+
+        // Find controller below the storagePath
+        crow::connections::systemBus->async_method_call(
+            [asyncResp, storageId, controllerId,
+             cb](const boost::system::error_code ec2,
+                 const dbus::utility::MapperGetSubTreeResponse& subtree2) {
+            if (ec2)
+            {
+                BMCWEB_LOG_DEBUG
+                    << "requestRoutesStorageController DBUS response error"
+                    << ec2;
+                messages::resourceNotFound(
+                    asyncResp->res,
+                    "#StorageController.v1_6_0.StorageController",
+                    controllerId);
+                return;
+            }
+
+            auto ctrl = std::find_if(
+                subtree2.begin(), subtree2.end(),
+                [&controllerId](
+                    const std::pair<std::string,
+                                    dbus::utility::MapperServiceMap>& object) {
+                return sdbusplus::message::object_path(object.first)
+                           .filename() == controllerId;
+                });
+            if (ctrl == subtree2.end())
+            {
+                messages::resourceNotFound(
+                    asyncResp->res,
+                    "#StorageController.v1_6_0.StorageController",
+                    controllerId);
+                return;
+            }
+
+            cb(ctrl->first, ctrl->second);
+            },
+            "xyz.openbmc_project.ObjectMapper",
+            "/xyz/openbmc_project/object_mapper",
+            "xyz.openbmc_project.ObjectMapper", "GetSubTree", storage->first, 0,
+            std::array<const char*, 1>{
+                "xyz.openbmc_project.Inventory.Item.StorageController"});
+        },
+        "xyz.openbmc_project.ObjectMapper",
+        "/xyz/openbmc_project/object_mapper",
+        "xyz.openbmc_project.ObjectMapper", "GetSubTree",
+        "/xyz/openbmc_project/inventory", 0,
+        std::array<std::string, 1>{
+            "xyz.openbmc_project.Inventory.Item.Storage"});
+}
+
 inline void populateStorageController(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& storageId, const std::string& controllerId,
     const std::string& connectionName, const std::string& path,
+    const dbus::utility::MapperServiceMap& ifaces,
     const std::vector<std::string>& interfaces)
 {
     asyncResp->res.jsonValue["@odata.type"] =
@@ -1359,6 +1484,7 @@ inline void populateStorageController(
     asyncResp->res.jsonValue["Status"]["State"] = "Enabled";
     asyncResp->res.jsonValue["PartLocation"]["LocationType"] = "Embedded";
     getStorageControllerLocation(asyncResp, connectionName, path, interfaces);
+    tryPopulateControllerNvme(asyncResp, path, ifaces);
 
     sdbusplus::asio::getProperty<bool>(
         *crow::connections::systemBus, connectionName, path,
@@ -1425,7 +1551,7 @@ inline void getStorageControllerHandler(
 
         const std::string& connectionName = interfaceDict.front().first;
         populateStorageController(asyncResp, storageId, controllerId,
-                                  connectionName, path,
+                                  connectionName, path, interfaceDict,
                                   interfaceDict.front().second);
     }
 }
