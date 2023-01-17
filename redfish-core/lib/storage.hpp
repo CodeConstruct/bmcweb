@@ -20,6 +20,7 @@
 
 #include <app.hpp>
 #include <dbus_utility.hpp>
+#include <http/utility.hpp>
 #include <query.hpp>
 #include <registries/privilege_registry.hpp>
 #include <sdbusplus/asio/property.hpp>
@@ -793,6 +794,29 @@ inline void tryPopulateControllerNvme(
     (void)path;
 }
 
+inline void tryPopulateControllerSecurity(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const boost::urls::url& controllerUrl,
+    const dbus::utility::MapperServiceMap& ifaces)
+{
+    if (!matchServiceName(ifaces,
+        "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity"))
+    {
+        return;
+    }
+
+    boost::urls::url sendUrl(controllerUrl);
+    crow::utility::appendUrlPieces(sendUrl,
+        "Actions", "StorageController.SecuritySend");
+    boost::urls::url receiveUrl(controllerUrl);
+    crow::utility::appendUrlPieces(receiveUrl,
+        "Actions", "StorageController.SecurityReceive");
+
+    auto& actions = asyncResp->res.jsonValue["Actions"];
+    actions["#StorageController.SecuritySend"]["target"] = sendUrl;
+    actions["#StorageController.SecurityReceive"]["target"] = receiveUrl;
+}
+
 inline void getStorageController(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& storageId, const std::string& controllerId,
@@ -810,6 +834,7 @@ inline void getStorageController(
     asyncResp->res.jsonValue["Id"] = controllerId;
 
     tryPopulateControllerNvme(asyncResp, path, ifaces);
+    tryPopulateControllerSecurity(asyncResp, url, ifaces);
 
     auto health = std::make_shared<HealthPopulate>(asyncResp);
     health->populate();
@@ -934,6 +959,203 @@ inline void requestRoutesStorageController(App& app)
                            const dbus::utility::MapperServiceMap& ifaces) {
             getStorageController(asyncResp, storageId, controllerId, path,
                                  ifaces);
+            });
+        });
+}
+
+inline void securitySendAction(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& path, const dbus::utility::MapperServiceMap& ifaces,
+    uint8_t proto, uint16_t protoSpecific, const std::string& dataBase64)
+{
+    std::string dataString;
+    if (!crow::utility::base64Decode(dataBase64, dataString))
+    {
+        BMCWEB_LOG_DEBUG << "base data base64decode";
+        messages::actionParameterValueFormatError(
+            asyncResp->res, "<data>", "Data", "StorageController.SecuritySend");
+        return;
+    }
+
+    // base64Decode outputs a string not bytes
+    std::span<const uint8_t> data(
+        reinterpret_cast<const uint8_t*>(dataString.data()), dataString.size());
+
+    auto service = matchServiceName(ifaces,
+            "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity");
+    if (!service)
+    {
+        BMCWEB_LOG_DEBUG << "No servicename";
+        messages::internalError(asyncResp->res);
+        return;
+    }
+
+    crow::connections::systemBus->async_method_call(
+        [asyncResp](const boost::system::error_code ec,
+                    const sdbusplus::message_t& msg) {
+        // Failure returned from NVMe
+        const ::sd_bus_error* sd_err = msg.get_error();
+        if (sd_err)
+        {
+            messages::generalError(asyncResp->res);
+            BMCWEB_LOG_DEBUG << "SecuritySend NVMe error";
+            if (sd_err->message)
+            {
+                BMCWEB_LOG_DEBUG << "Error: " << sd_err->name << " message "
+                                 << sd_err->message;
+                asyncResp->res.jsonValue["error"]["message"] = sd_err->message;
+            }
+            return;
+        }
+
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "SecuritySend dbus error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        // success
+        },
+        *service, path,
+        "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity",
+        "SecuritySend", proto, protoSpecific, data);
+}
+
+inline void securityReceiveAction(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& path, const dbus::utility::MapperServiceMap& ifaces,
+    uint8_t proto, uint16_t protoSpecific, uint32_t transferLength)
+{
+    auto service = matchServiceName(ifaces,
+            "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity");
+    if (!service)
+    {
+        BMCWEB_LOG_DEBUG << "No servicename";
+        messages::internalError(asyncResp->res);
+        return;
+    }
+
+    crow::connections::systemBus->async_method_call(
+        [asyncResp](const boost::system::error_code ec,
+                    const sdbusplus::message_t& msg,
+                    const std::vector<uint8_t>& data) {
+        // Failure returned from NVMe
+        const ::sd_bus_error* sd_err = msg.get_error();
+        if (sd_err)
+        {
+            messages::generalError(asyncResp->res);
+            BMCWEB_LOG_DEBUG << "SecurityReceive NVMe error";
+            if (sd_err->message)
+            {
+                BMCWEB_LOG_DEBUG << "Error: " << sd_err->name << " message "
+                                 << sd_err->message;
+                asyncResp->res.jsonValue["error"]["message"] = sd_err->message;
+            }
+            return;
+        }
+
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "SecurityReceive dbus error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        // Success
+        asyncResp->res.jsonValue["Data"] =
+            crow::utility::base64encode(std::string_view(
+                reinterpret_cast<const char*>(data.data()), data.size()));
+        },
+        *service, path,
+        "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity",
+        "SecurityReceive", proto, protoSpecific, transferLength);
+}
+
+inline void requestRoutesStorageControllerActions(App& app)
+{
+    BMCWEB_ROUTE(
+        app,
+        "/redfish/v1/Systems/<str>/Storage/<str>/Controllers/<str>/Actions/StorageController.SecuritySend")
+        .privileges(redfish::privileges::postStorageController)
+        .methods(boost::beast::http::verb::post)(
+            [&app](const crow::Request& req,
+                   const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                   const std::string& systemName, const std::string& storageId,
+                   const std::string& controllerId) {
+        if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+        {
+            return;
+        }
+        if (systemName != "system")
+        {
+            messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                       systemName);
+            return;
+        }
+
+        uint8_t proto;
+        uint16_t protoSpecific;
+        std::string dataBase64;
+
+        if (!json_util::readJsonAction(req, asyncResp->res, "SecurityProtocol",
+                                       proto, "SecurityProtocolSpecific",
+                                       protoSpecific, "Data", dataBase64))
+        {
+            BMCWEB_LOG_DEBUG << "Missing request json parameters";
+            return;
+        }
+
+        findStorageController(
+            asyncResp, storageId, controllerId,
+            [asyncResp, proto, protoSpecific,
+             dataBase64](const std::string& path,
+                          const dbus::utility::MapperServiceMap& ifaces) {
+            securitySendAction(asyncResp, path, ifaces, proto, protoSpecific,
+                               dataBase64);
+            });
+        });
+
+    BMCWEB_ROUTE(
+        app,
+        "/redfish/v1/Systems/<str>/Storage/<str>/Controllers/<str>/Actions/StorageController.SecurityReceive")
+        .privileges(redfish::privileges::postStorageController)
+        .methods(boost::beast::http::verb::post)(
+            [&app](const crow::Request& req,
+                   const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                   const std::string& systemName, const std::string& storageId,
+                   const std::string& controllerId) {
+        if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+        {
+            return;
+        }
+        if (systemName != "system")
+        {
+            messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                       systemName);
+            return;
+        }
+
+        uint8_t proto;
+        uint16_t protoSpecific;
+        uint32_t transferLength;
+
+        if (!json_util::readJsonAction(req, asyncResp->res, "SecurityProtocol",
+                                       proto, "SecurityProtocolSpecific",
+                                       protoSpecific, "AllocationLength",
+                                       transferLength))
+        {
+            BMCWEB_LOG_DEBUG << "Missing request json parameters";
+            return;
+        }
+
+        findStorageController(
+            asyncResp, storageId, controllerId,
+            [asyncResp, proto, protoSpecific,
+             transferLength](const std::string& path,
+                              const dbus::utility::MapperServiceMap& ifaces) {
+            securityReceiveAction(asyncResp, path, ifaces, proto,
+                                  protoSpecific, transferLength);
             });
         });
 }

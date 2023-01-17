@@ -100,6 +100,7 @@ class RedfishService
         requestRoutesStorageCollection(app);
         requestRoutesStorage(app);
         requestRoutesStorageController(app);
+        requestRoutesStorageControllerActions(app);
         requestRoutesDrive(app);
         requestRoutesCable(app);
         requestRoutesCableCollection(app);
