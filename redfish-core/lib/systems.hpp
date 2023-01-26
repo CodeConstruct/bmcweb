@@ -2762,8 +2762,9 @@ inline void requestRoutesSystemActionsReset(App& app)
             return;
         }
         std::string resetType;
+        std::optional<int> delayTime;
         if (!json_util::readJsonAction(req, asyncResp->res, "ResetType",
-                                       resetType))
+                                       resetType, "Delay", delayTime))
         {
             return;
         }
@@ -2815,6 +2816,41 @@ inline void requestRoutesSystemActionsReset(App& app)
             return;
         }
 
+        if (delayTime.has_value() && delayTime.value() > 900) // 15 minutes
+        {
+            BMCWEB_LOG_DEBUG << "reset delay timer too large, >900";
+            messages::propertyValueOutOfRange(asyncResp->res, "900", "Delay");
+            return;
+        }
+        if (delayTime.has_value() && delayTime.value() <= 900 &&
+            (resetType == "On" || resetType == "ForceOn" ||
+             resetType == "ForceOff" || resetType == "ForceRestart" ||
+             resetType == "GracefulShutdown" || resetType == "PowerCycle"))
+        {
+            BMCWEB_LOG_DEBUG << "Seting delayed " << resetType;
+            const std::string escape = R"(\x20)";
+            std::string constructedServiceName =
+                "delay-reset@" + std::to_string(delayTime.value()) + escape +
+                resetType + ".service";
+
+            BMCWEB_LOG_DEBUG << "starting service named: "
+                             << constructedServiceName;
+
+            crow::connections::systemBus->async_method_call(
+                [asyncResp](const boost::system::error_code ec) {
+                if (ec)
+                {
+                    BMCWEB_LOG_ERROR << "error in calling delay-reset " << ec;
+                    messages::internalError(asyncResp->res);
+                }
+                BMCWEB_LOG_DEBUG << "delay reset REQUEST success";
+                messages::success(asyncResp->res);
+                return;
+                },
+                "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                "org.freedesktop.systemd1.Manager", "RestartUnit",
+                constructedServiceName, "replace");
+        }
         if (hostCommand)
         {
             crow::connections::systemBus->async_method_call(
@@ -2925,7 +2961,6 @@ inline void afterPortRequest(
  */
 inline void requestRoutesSystems(App& app)
 {
-
     BMCWEB_ROUTE(app, "/redfish/v1/Systems/system/")
         .privileges(redfish::privileges::headComputerSystem)
         .methods(boost::beast::http::verb::head)(
@@ -3282,6 +3317,11 @@ inline void requestRoutesSystemResetActionInfo(App& app)
         parameter["AllowableValues"] = std::move(allowableValues);
         parameters.emplace_back(std::move(parameter));
 
+        nlohmann::json::object_t delayParameter;
+        delayParameter["Name"] = "Delay";
+        delayParameter["Required"] = false;
+        delayParameter["DataType"] = "Number";
+        parameters.emplace_back(std::move(delayParameter));
         asyncResp->res.jsonValue["Parameters"] = std::move(parameters);
         });
 }
