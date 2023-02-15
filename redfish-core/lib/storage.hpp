@@ -143,6 +143,257 @@ inline void getDrives(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
 }
 
 inline void
+    populateWarthogInfo(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                        const dbus::utility::MapperServiceMap& ifaces,
+                        const std::string& path)
+{
+    std::string connection = "";
+    for (const auto& x : ifaces)
+    {
+        for (const std::string& y : x.second)
+        {
+            if (y == "com.google.gbmc.ssd.warthog")
+            {
+                connection = x.first;
+                break;
+            }
+        }
+        if (!connection.empty())
+        {
+            break;
+        }
+    }
+    if (connection.empty())
+    {
+        return;
+    }
+
+    // Warthog GPIO
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, connection, path,
+        "com.google.gbmc.ssd.warthog",
+        [asyncResp, connection, path](
+            const boost::system::error_code ec2,
+            const std::vector<std::pair<
+                std::string, dbus::utility::DbusVariantType>>& propertiesList) {
+        if (ec2)
+        {
+            // this interface isn't necessary
+            return;
+        }
+
+        const bool* manufacturingMode = nullptr;
+        const bool* pwrseqPgood = nullptr;
+        const bool* watchdogTriggered = nullptr;
+        const bool* fruEepromWriteProtect = nullptr;
+        const bool* morristownOtpWriteProtect = nullptr;
+        const bool* triggerPowerCycle = nullptr;
+        const bool* triggerReset = nullptr;
+        const bool* disableWatchdog = nullptr;
+        const bool* debugMode = nullptr;
+        const bool* morristownOtpWriteEnable = nullptr;
+        const uint64_t* spiImgSelect = nullptr;
+        const uint64_t* bootFailureCount = nullptr;
+        const std::string* pwrseqState = nullptr;
+        const uint64_t* uptimeInSeconds = nullptr;
+        const uint64_t* uptimeInMinutes = nullptr;
+        const bool* pGoodVdd12V0Ssd = nullptr;
+        const bool* pGoodVddPcMor = nullptr;
+        const bool* pGoodVdd3V3PcIe = nullptr;
+        const bool* pGoodVdd0V83Mor = nullptr;
+        const bool* pGoodVttVrefCa = nullptr;
+        const bool* pGoodVddFlashVcc = nullptr;
+        const bool* pGood12VFlashVpp = nullptr;
+        const std::string* cpldVersion = nullptr;
+
+        const bool success = sdbusplus::unpackPropertiesNoThrow(
+            dbus_utils::UnpackErrorPrinter(), propertiesList,
+            "ManufacturingMode", manufacturingMode, "WatchdogTriggered",
+            watchdogTriggered, "PwrseqPgood", pwrseqPgood,
+            "FruEepromWriteProtect", fruEepromWriteProtect,
+            "MorristownOtpWriteProtect", morristownOtpWriteProtect,
+            "TriggerPowerCycle", triggerPowerCycle, "TriggerReset",
+            triggerReset, "DisableWatchdog", disableWatchdog, "DebugMode",
+            debugMode, "MorristownOtpWriteEnable", morristownOtpWriteEnable,
+            "SpiImgSelect", spiImgSelect, "BootFailureCount", bootFailureCount,
+            "PwrseqState", pwrseqState, "UptimeInSeconds", uptimeInSeconds,
+            "UptimeInMinutes", uptimeInMinutes, "PGoodVdd12V0Ssd",
+            pGoodVdd12V0Ssd, "PGoodVddPcMor", pGoodVddPcMor, "PGoodVdd3V3PcIe",
+            pGoodVdd3V3PcIe, "PGoodVdd0V83Mor", pGoodVdd0V83Mor,
+            "PGoodVttVrefCa", pGoodVttVrefCa, "PGoodVddFlashVcc",
+            pGoodVddFlashVcc, "PGood12VFlashVpp", pGood12VFlashVpp,
+            "CpldVersion", cpldVersion);
+
+        if (!success)
+        {
+            BMCWEB_LOG_CRITICAL << "Failed to parse Warthog Arguments";
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        nlohmann::json::object_t warthog;
+        warthog["@odata.type"] = "#GoogleWarthog.v1_0_0.GoogleWarthog";
+        // Write Only and will always read as false.
+        warthog["CpldReset"] = false;
+
+        if (manufacturingMode != nullptr)
+        {
+            warthog["ManufacturingMode"] = *manufacturingMode;
+        }
+        if (pwrseqPgood != nullptr)
+        {
+            warthog["PwrseqPgood"] = *pwrseqPgood;
+        }
+        if (watchdogTriggered != nullptr)
+        {
+            warthog["WatchdogTriggered"] = *watchdogTriggered;
+        }
+        if (fruEepromWriteProtect != nullptr)
+        {
+            warthog["FruEepromWriteProtect"] = *fruEepromWriteProtect;
+        }
+        if (morristownOtpWriteProtect != nullptr)
+        {
+            warthog["MorristownOtpWriteProtect"] = *morristownOtpWriteProtect;
+        }
+        if (triggerPowerCycle != nullptr)
+        {
+            warthog["TriggerPowerCycle"] = *triggerPowerCycle;
+        }
+        if (triggerReset != nullptr)
+        {
+            warthog["TriggerReset"] = *triggerReset;
+        }
+        if (disableWatchdog != nullptr)
+        {
+            warthog["DisableWatchdog"] = *disableWatchdog;
+        }
+        if (debugMode != nullptr)
+        {
+            warthog["DebugMode"] = *debugMode;
+        }
+        if (morristownOtpWriteEnable != nullptr)
+        {
+            warthog["MorristownOtpWriteEnable"] = *morristownOtpWriteEnable;
+        }
+        if (spiImgSelect != nullptr)
+        {
+            warthog["SpiImgSelect"] = *spiImgSelect;
+        }
+        if (bootFailureCount != nullptr)
+        {
+            warthog["BootFailureCount"] = *bootFailureCount;
+        }
+        if (pwrseqState != nullptr)
+        {
+            warthog["PwrseqState"] = *pwrseqState;
+        }
+        if (uptimeInSeconds != nullptr)
+        {
+            warthog["UptimeInSeconds"] = *uptimeInSeconds;
+        }
+        if (uptimeInMinutes != nullptr)
+        {
+            warthog["UptimeInMinutes"] = *uptimeInMinutes;
+        }
+        if (pGoodVdd12V0Ssd != nullptr)
+        {
+            warthog["PGoodVdd12V0Ssd"] = *pGoodVdd12V0Ssd;
+        }
+        if (pGoodVddPcMor != nullptr)
+        {
+            warthog["PGoodVddPcMor"] = *pGoodVddPcMor;
+        }
+        if (pGoodVdd3V3PcIe != nullptr)
+        {
+            warthog["PGoodVdd3V3PcIe"] = *pGoodVdd3V3PcIe;
+        }
+        if (pGoodVdd0V83Mor != nullptr)
+        {
+            warthog["PGoodVdd0V83Mor"] = *pGoodVdd0V83Mor;
+        }
+        if (pGoodVttVrefCa != nullptr)
+        {
+            warthog["PGoodVttVrefCa"] = *pGoodVttVrefCa;
+        }
+        if (pGoodVddFlashVcc != nullptr)
+        {
+            warthog["PGoodVddFlashVcc"] = *pGoodVddFlashVcc;
+        }
+        if (pGood12VFlashVpp != nullptr)
+        {
+            warthog["PGood12VFlashVpp"] = *pGood12VFlashVpp;
+        }
+        if (cpldVersion != nullptr)
+        {
+            warthog["CpldVersion"] = *cpldVersion;
+        }
+
+        warthog["Name"] = "Warthog GPIO Action Info";
+        asyncResp->res.jsonValue["Links"]["Oem"]["Google"]["Warthog"] =
+            std::move(warthog);
+
+        sdbusplus::asio::getAllProperties(
+            *crow::connections::systemBus, connection, path,
+            "xyz.openbmc_project.Inventory.Decorator.Asset",
+            [asyncResp](
+                const boost::system::error_code ec3,
+                const std::vector<std::pair<
+                    std::string, dbus::utility::DbusVariantType>>& asset) {
+            if (ec3)
+            {
+                // this interface isn't necessary
+                return;
+            }
+            nlohmann::json::object_t warthogFruEeprom;
+
+            const std::string* partNumber = nullptr;
+            const std::string* serialNumber = nullptr;
+            const std::string* manufacturer = nullptr;
+            const std::string* model = nullptr;
+            const std::string* manufactureDate = nullptr;
+
+            const bool assetSuccess = sdbusplus::unpackPropertiesNoThrow(
+                dbus_utils::UnpackErrorPrinter(), asset, "PartNumber",
+                partNumber, "SerialNumber", serialNumber, "Manufacturer",
+                manufacturer, "Model", model, "ManufactureDate",
+                manufactureDate);
+            if (!assetSuccess)
+            {
+                BMCWEB_LOG_CRITICAL << "Failed to parse Warthog Arguments";
+                return;
+            }
+            warthogFruEeprom["DeviceName"] = "Warthog";
+            // If we get to this point, then it is enabled.
+            warthogFruEeprom["Validity"] = "Enabled";
+            if (partNumber != nullptr)
+            {
+                warthogFruEeprom["BrdPartNumber"] = *partNumber;
+            }
+            if (serialNumber != nullptr)
+            {
+                warthogFruEeprom["BrdSerialNumber"] = *serialNumber;
+            }
+            if (manufacturer != nullptr)
+            {
+                warthogFruEeprom["BrdMfgName"] = *manufacturer;
+            }
+            if (model != nullptr)
+            {
+                warthogFruEeprom["BrdProductName"] = *model;
+            }
+            if (manufactureDate != nullptr)
+            {
+                warthogFruEeprom["BrdMfgTime"] = *manufactureDate;
+            }
+            asyncResp->res
+                .jsonValue["Links"]["Oem"]["Google"]["Warthog"]["FruEeprom"] =
+                std::move(warthogFruEeprom);
+            });
+        });
+}
+
+inline void
     getDriveFromChassis(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                         const std::shared_ptr<HealthPopulate>& health,
                         const sdbusplus::message::object_path& storagePath)
@@ -1599,6 +1850,48 @@ inline void findStorageController(
             "xyz.openbmc_project.Inventory.Item.Storage"});
 }
 
+inline static void
+    setWarthogOemGpio(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                      const std::string& path, const std::string& property,
+                      bool value)
+{
+
+    sdbusplus::asio::setProperty(
+        *crow::connections::systemBus, "com.google.gbmc.ssd", path,
+        "com.google.gbmc.ssd.warthog", property, value,
+        [asyncResp](const boost::system::error_code ec) {
+        if (ec)
+        {
+            BMCWEB_LOG_ERROR << "setWarthogOemGpio D-Bus responses error: "
+                             << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        messages::success(asyncResp->res);
+        });
+}
+
+inline static void
+    setWarthogSpiImage(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                       const std::string& path, const std::string& property,
+                       std::string value)
+{
+
+    sdbusplus::asio::setProperty(
+        *crow::connections::systemBus, "com.google.gbmc.ssd", path,
+        "com.google.gbmc.ssd.warthog", property, value,
+        [asyncResp](const boost::system::error_code ec) {
+        if (ec)
+        {
+            BMCWEB_LOG_ERROR << "setWarthogOemGpio D-Bus responses error: "
+                             << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        messages::success(asyncResp->res);
+        });
+}
+
 inline void requestRoutesStorageControllerActions(App& app)
 {
     BMCWEB_ROUTE(
@@ -1685,6 +1978,70 @@ inline void requestRoutesStorageControllerActions(App& app)
                                   transferLength);
             });
         });
+
+    BMCWEB_ROUTE(app,
+                 "/redfish/v1/Systems/<str>/Storage/<str>/Controllers/<str>")
+        .privileges(redfish::privileges::patchStorageController)
+        .methods(boost::beast::http::verb::patch)(
+            [&app](const crow::Request& req,
+                   const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                   const std::string& systemName, const std::string& storageId,
+                   const std::string& controllerId) {
+        if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+        {
+            return;
+        }
+        if (systemName != "system")
+        {
+            messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                       systemName);
+            return;
+        }
+
+        nlohmann::json warthogOem;
+        if (!json_util::readJsonPatch(req, asyncResp->res,
+                                      "Links/Oem/Google/Warthog", warthogOem))
+        {
+            BMCWEB_LOG_DEBUG << "Warthog OEM is not in the patch input";
+            return;
+        }
+
+        findStorageController(asyncResp, storageId, controllerId,
+                              [asyncResp, storageId, controllerId, warthogOem](
+                                  const std::string& path,
+                                  const dbus::utility::MapperServiceMap&) {
+            if (warthogOem.contains("MorristownOtpWriteEnable"))
+            {
+                setWarthogOemGpio(asyncResp, path, "MorristownOtpWriteEnable",
+                                  warthogOem["MorristownOtpWriteEnable"]);
+            }
+            if (warthogOem.contains("TriggerPowerCycle"))
+            {
+                setWarthogOemGpio(asyncResp, path, "TriggerPowerCycle",
+                                  warthogOem["TriggerPowerCycle"]);
+            }
+            if (warthogOem.contains("DisableWatchdog"))
+            {
+                setWarthogOemGpio(asyncResp, path, "DisableWatchdog",
+                                  warthogOem["DisableWatchdog"]);
+            }
+            if (warthogOem.contains("TriggerReset"))
+            {
+                setWarthogOemGpio(asyncResp, path, "TriggerReset",
+                                  warthogOem["TriggerReset"]);
+            }
+            if (warthogOem.contains("CpldReset"))
+            {
+                setWarthogOemGpio(asyncResp, path, "CpldReset",
+                                  warthogOem["CpldReset"]);
+            }
+            if (warthogOem.contains("SpiImgSelect"))
+            {
+                setWarthogSpiImage(asyncResp, path, "SpiImgSelect",
+                                   warthogOem["SpiImgSelect"]);
+            }
+        });
+        });
 }
 
 inline void populateStorageController(
@@ -1707,6 +2064,7 @@ inline void populateStorageController(
     getStorageControllerLocation(asyncResp, connectionName, path, interfaces);
     tryPopulateControllerNvme(asyncResp, path, ifaces);
     tryPopulateControllerSecurity(asyncResp, url, ifaces);
+    populateWarthogInfo(asyncResp, ifaces, path);
 
     sdbusplus::asio::getProperty<bool>(
         *crow::connections::systemBus, connectionName, path,
