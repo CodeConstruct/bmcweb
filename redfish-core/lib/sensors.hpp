@@ -2919,6 +2919,105 @@ inline void handleSensorGet(App& app, const crow::Request& req,
         });
 }
 
+inline void patchSensorThroughDbus(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& sensorPath,
+    const ::dbus::utility::MapperGetObject& mapperResponse,
+    double targetReading)
+{
+    BMCWEB_LOG_DEBUG << "Patch Sensor Through Dbus";
+    if (mapperResponse.size() != 1)
+    {
+        messages::internalError(asyncResp->res);
+        return;
+    }
+    const auto& valueIface = *mapperResponse.begin();
+    const std::string& connectionName = valueIface.first;
+    BMCWEB_LOG_DEBUG << "Looking up " << connectionName;
+    BMCWEB_LOG_DEBUG << "Path " << sensorPath;
+
+    sdbusplus::asio::setProperty(
+        *crow::connections::systemBus, connectionName, sensorPath,
+        "xyz.openbmc_project.Sensor.Value", "Value", targetReading,
+        [asyncResp](const boost::system::error_code ec) {
+        if (ec)
+        {
+            BMCWEB_LOG_ERROR << "setProperty D-Bus responses error: " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        messages::success(asyncResp->res);
+        });
+}
+
+inline void
+    handleSensorPatch(App& app, const crow::Request& req,
+                      const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                      const std::string& chassisId, const std::string& sensorId)
+{
+    BMCWEB_LOG_DEBUG << "Sensor handleSensorPatch";
+    BMCWEB_LOG_DEBUG << "Request body = " << req.body();
+    std::optional<double> targetReading;
+    json_util::readJsonPatch(req, asyncResp->res, "Reading", targetReading);
+    if (targetReading)
+    {
+        BMCWEB_LOG_DEBUG << "Target Reading = " << *targetReading;
+    }
+    else
+    {
+        BMCWEB_LOG_DEBUG << "Target Reading not found";
+        return;
+    }
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        return;
+    }
+    size_t index = sensorId.find('_');
+    if (index == std::string::npos)
+    {
+        messages::resourceNotFound(asyncResp->res, sensorId, "Sensor");
+        return;
+    }
+    asyncResp->res.jsonValue["@odata.id"] = crow::utility::urlFromPieces(
+        "redfish", "v1", "Chassis", chassisId, "Sensors", sensorId);
+    std::string sensorType = sensorId.substr(0, index);
+    std::string sensorName = sensorId.substr(index + 1);
+    // fan_pwm and fan_tach need special handling
+    if (sensorType == "fantach" || sensorType == "fanpwm")
+    {
+        sensorType.insert(3, 1, '_');
+    }
+
+    BMCWEB_LOG_DEBUG << "Sensor doPatch enter";
+
+    const std::array<const char*, 1> interfaces = {
+        "xyz.openbmc_project.Sensor.Value"};
+    std::string sensorPath =
+        "/xyz/openbmc_project/sensors/" + sensorType + '/' + sensorName;
+    // Get a list of all of the sensors that implement Sensor.Value
+    // and get the path and service name associated with the sensor
+    crow::connections::systemBus->async_method_call(
+        [asyncResp, sensorPath, sensorName,
+         targetReading](const boost::system::error_code ec,
+                        const ::dbus::utility::MapperGetObject& subtree) {
+        BMCWEB_LOG_DEBUG << "Sensor Path: " << sensorPath;
+        BMCWEB_LOG_DEBUG << "Sensor Name: " << sensorName;
+        if (ec)
+        {
+            messages::internalError(asyncResp->res);
+            BMCWEB_LOG_ERROR << "Sensor getSensorPaths resp_handler: "
+                             << "Dbus error " << ec;
+            return;
+        }
+        patchSensorThroughDbus(asyncResp, sensorPath, subtree, *targetReading);
+        BMCWEB_LOG_DEBUG << "respHandler1 exit";
+        },
+        "xyz.openbmc_project.ObjectMapper",
+        "/xyz/openbmc_project/object_mapper",
+        "xyz.openbmc_project.ObjectMapper", "GetObject", sensorPath,
+        interfaces);
+}
+
 } // namespace sensors
 
 inline void requestRoutesSensorCollection(App& app)
@@ -2935,6 +3034,10 @@ inline void requestRoutesSensor(App& app)
         .privileges(redfish::privileges::getSensor)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(sensors::handleSensorGet, std::ref(app)));
+    BMCWEB_ROUTE(app, "/redfish/v1/Chassis/<str>/Sensors/<str>/")
+        .privileges(redfish::privileges::patchSensor)
+        .methods(boost::beast::http::verb::patch)(
+            std::bind_front(sensors::handleSensorPatch, std::ref(app)));
 }
 
 } // namespace redfish
