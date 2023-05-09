@@ -553,6 +553,10 @@ inline void requestRoutesStorage(App& app)
                 crow::utility::urlFromPieces("redfish", "v1", "Systems",
                                              "system", "Storage", storageId,
                                              "Controllers");
+            asyncResp->res.jsonValue["Volumes"]["@odata.id"] =
+                crow::utility::urlFromPieces("redfish", "v1", "Systems",
+                                             "system", "Storage", storageId,
+                                             "Volumes");
             });
         });
 
@@ -2358,6 +2362,295 @@ inline void storageControllerCollectionHandler(
     });
 }
 
+inline void
+    tryPopulateVolumeNvme(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                          const std::string& connectionName,
+                          const std::string& path,
+                          const dbus::utility::MapperServiceMap& ifaces,
+                          const std::string& volumeId, size_t blockSize)
+{
+    if (!matchServiceName(ifaces, "xyz.openbmc_project.Nvme.Volume"))
+    {
+        return;
+    }
+
+    asyncResp->res.jsonValue["Name"] = std::string("Namespace ") + volumeId;
+
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, connectionName, path,
+        "xyz.openbmc_project.Nvme.Volume",
+        [asyncResp, blockSize](
+            const boost::system::error_code& ec,
+            const std::vector<std::pair<
+                std::string, dbus::utility::DbusVariantType>>& propertiesList) {
+        if (ec)
+        {
+            std::cerr << "error fetching nvme volume " << ec << std::endl;
+            // this interface isn't necessary
+            return;
+        }
+
+        const uint32_t* namespaceId = nullptr;
+        const size_t* lbaFormat = nullptr;
+
+        const bool success = sdbusplus::unpackPropertiesNoThrow(
+            dbus_utils::UnpackErrorPrinter(), propertiesList, "NamespaceId",
+            namespaceId, "LBAFormat", lbaFormat);
+
+        if (!success)
+        {
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        auto& nvprop = asyncResp->res.jsonValue["NVMeNamespaceProperties"];
+        if (namespaceId)
+        {
+            nvprop["NamespaceId"] =
+                std::string("0x") + intToHexString(*namespaceId, 8);
+        }
+        if (lbaFormat)
+        {
+            auto& lbafprop = nvprop["LBAFormat"];
+            lbafprop["LBAFormatType"] =
+                std::string("LBAFormat") + std::to_string(*lbaFormat);
+            lbafprop["LBADataSizeBytes"] = blockSize;
+            // TODO: populate other lbaformat attributes, and metadata_at_end
+        }
+        });
+}
+
+inline void populateStorageVolume(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& storageId, const std::string& volumeId,
+    const std::string& connectionName, const std::string& path,
+    const dbus::utility::MapperServiceMap& ifaces)
+{
+    asyncResp->res.jsonValue["@odata.type"] = "#Volume.v1_9_0.Volume";
+    auto url =
+        crow::utility::urlFromPieces("redfish", "v1", "Systems", "system",
+                                     "Storage", storageId, "Volumes", volumeId);
+    asyncResp->res.jsonValue["@odata.id"] = url;
+    // May be overridden by nvme
+    asyncResp->res.jsonValue["Name"] = std::string("Volume ") + volumeId;
+    asyncResp->res.jsonValue["Id"] = volumeId;
+
+    size_t volBlockSize = 0;
+
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, connectionName, path,
+        "xyz.openbmc_project.Inventory.Item.Volume",
+        [asyncResp, &volBlockSize](
+            const boost::system::error_code& ec,
+            const std::vector<std::pair<
+                std::string, dbus::utility::DbusVariantType>>& propertiesList) {
+        if (ec)
+        {
+            // this interface isn't necessary
+            return;
+        }
+
+        const uint64_t* size;
+        const size_t* blockSize;
+
+        const bool success = sdbusplus::unpackPropertiesNoThrow(
+            dbus_utils::UnpackErrorPrinter(), propertiesList, "Size", size,
+            "BlockSize", blockSize);
+
+        if (!success)
+        {
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        auto& cap = asyncResp->res.jsonValue["Capacity"];
+        auto& capdata = cap["Data"];
+        if (size)
+        {
+            capdata["ProvisionedBytes"] = *size;
+        }
+        // Capacity.Metadata or provisioned/allocated is not currently handled
+        // by OpenBMC
+        if (blockSize)
+        {
+            asyncResp->res.jsonValue["BlockSizeBytes"] = *blockSize;
+            volBlockSize = *blockSize;
+        }
+        });
+
+    tryPopulateVolumeNvme(asyncResp, connectionName, path, ifaces, volumeId,
+                          volBlockSize);
+}
+
+inline void findStorageVolume(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& storageId, const std::string& volumeId,
+    const std::function<
+        void(const std::string& path, const std::string& connectionName,
+             const dbus::utility::MapperServiceMap& ifaces)>& cb)
+{
+    findStorage(asyncResp, storageId,
+                [asyncResp, storageId, volumeId,
+                 cb](const sdbusplus::message::object_path& storagePath) {
+        constexpr std::array<std::string_view, 1> interfaces = {
+            "xyz.openbmc_project.Inventory.Item.Volume"};
+        dbus::utility::getAssociatedSubTree(
+            storagePath / "containing",
+            sdbusplus::message::object_path("/xyz/openbmc_project/inventory"),
+            0, interfaces,
+            [asyncResp, storageId, volumeId,
+             cb](const boost::system::error_code& ec,
+                 const dbus::utility::MapperGetSubTreeResponse& subtree) {
+            if (ec || subtree.empty())
+            {
+                BMCWEB_LOG_DEBUG << "findStorageVolume error" << ec;
+                messages::resourceNotFound(asyncResp->res,
+                                           "#Volume.v1_9_0.Volume", volumeId);
+                return;
+            }
+
+            for (const auto& [path, interfaceDict] : subtree)
+            {
+                sdbusplus::message::object_path object(path);
+                std::string id = object.filename();
+                if (id.empty())
+                {
+                    BMCWEB_LOG_ERROR << "Failed to find filename in " << path;
+                    messages::resourceNotFound(
+                        asyncResp->res, "#Volume.v1_9_0.Volume", volumeId);
+                    return;
+                }
+                if (id != volumeId)
+                {
+                    continue;
+                }
+
+                if (interfaceDict.size() != 1)
+                {
+                    BMCWEB_LOG_ERROR << "Connection size "
+                                     << interfaceDict.size()
+                                     << ", greater than 1";
+                    messages::internalError(asyncResp->res);
+                    return;
+                }
+
+                const std::string& connectionName = interfaceDict.front().first;
+                cb(path, connectionName, interfaceDict);
+                return;
+            }
+            BMCWEB_LOG_DEBUG << "findStorageVolume not found";
+            messages::resourceNotFound(asyncResp->res, "#Volume.v1_9_0.Volume",
+                                       volumeId);
+            });
+    });
+}
+
+inline void populateStorageVolumeCollection(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const boost::system::error_code& ec, const std::string& storageId,
+    const dbus::utility::MapperGetSubTreePathsResponse& volumeList)
+{
+    nlohmann::json::array_t members;
+    if (ec || volumeList.empty())
+    {
+        asyncResp->res.jsonValue["Members"] = std::move(members);
+        asyncResp->res.jsonValue["Members@odata.count"] = 0;
+        BMCWEB_LOG_DEBUG << "Failed to find any storage Volumes";
+        return;
+    }
+
+    for (const std::string& path : volumeList)
+    {
+        std::string id = sdbusplus::message::object_path(path).filename();
+        if (id.empty())
+        {
+            BMCWEB_LOG_ERROR << "Failed to find filename in " << path;
+            return;
+        }
+        nlohmann::json::object_t member;
+        member["@odata.id"] =
+            crow::utility::urlFromPieces("redfish", "v1", "Systems", "system",
+                                         "Storage", storageId, "Volumes", id);
+        members.emplace_back(member);
+    }
+    asyncResp->res.jsonValue["Members@odata.count"] = members.size();
+    asyncResp->res.jsonValue["Members"] = std::move(members);
+}
+
+inline void
+    storageVolumeHandler(App& app, const crow::Request& req,
+                         const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                         const std::string& systemName,
+                         const std::string& storageId,
+                         const std::string& volumeId)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        BMCWEB_LOG_DEBUG << "Failed to setup Redfish Route for StorageVolume";
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        BMCWEB_LOG_DEBUG << "Failed to find ComputerSystem of " << systemName;
+        return;
+    }
+    findStorageVolume(
+        asyncResp, storageId, volumeId,
+        [asyncResp, storageId,
+         volumeId](const std::string& path, const std::string& connectionName,
+                   const dbus::utility::MapperServiceMap& ifaces) {
+        populateStorageVolume(asyncResp, storageId, volumeId, connectionName,
+                              path, ifaces);
+        });
+}
+
+inline void storageVolumeCollectionHandler(
+    App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& systemName, const std::string& storageId)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        BMCWEB_LOG_DEBUG
+            << "Failed to setup Redfish Route for StorageVolume Collection";
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        BMCWEB_LOG_DEBUG << "Failed to find ComputerSystem of " << systemName;
+        return;
+    }
+
+    findStorage(asyncResp, storageId,
+                [asyncResp, storageId](
+                    const sdbusplus::message::object_path& storagePath) {
+        asyncResp->res.jsonValue["@odata.type"] =
+            "#VolumeCollection.VolumeCollection";
+        asyncResp->res.jsonValue["@odata.id"] =
+            crow::utility::urlFromPieces("redfish", "v1", "Systems", "system",
+                                         "Storage", storageId, "Volumes");
+        asyncResp->res.jsonValue["Name"] = "Storage Volume Collection";
+
+        constexpr std::array<std::string_view, 1> interfaces = {
+            "xyz.openbmc_project.Inventory.Item.Volume"};
+        dbus::utility::getAssociatedSubTreePaths(
+            storagePath / "containing",
+            sdbusplus::message::object_path("/xyz/openbmc_project/inventory"),
+            0, interfaces,
+            [asyncResp,
+             storageId](const boost::system::error_code& ec,
+                        const dbus::utility::MapperGetSubTreePathsResponse&
+                            volumeList) {
+            populateStorageVolumeCollection(asyncResp, ec, storageId,
+                                            volumeList);
+            });
+    });
+}
+
 inline void storageControllerHandler(
     App& app, const crow::Request& req,
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
@@ -2410,6 +2703,22 @@ inline void requestRoutesStorageController(App& app)
         .privileges(redfish::privileges::getStorageController)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(storageControllerHandler, std::ref(app)));
+}
+
+inline void requestRoutesStorageVolumeCollection(App& app)
+{
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/")
+        .privileges(redfish::privileges::getStorageVolumeCollection)
+        .methods(boost::beast::http::verb::get)(
+            std::bind_front(storageVolumeCollectionHandler, std::ref(app)));
+}
+
+inline void requestRoutesStorageVolume(App& app)
+{
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/<str>")
+        .privileges(redfish::privileges::getStorageVolume)
+        .methods(boost::beast::http::verb::get)(
+            std::bind_front(storageVolumeHandler, std::ref(app)));
 }
 
 } // namespace redfish

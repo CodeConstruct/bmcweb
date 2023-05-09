@@ -1413,6 +1413,22 @@ const static auto& postStorageControllerCollection = privilegeSetConfigureCompon
 const static auto& putStorageControllerCollection = privilegeSetConfigureComponents;
 const static auto& deleteStorageControllerCollection = privilegeSetConfigureComponents;
 
+// StorageVolume
+const static auto& getStorageVolume = privilegeSetLogin;
+const static auto& headStorageVolume = privilegeSetLogin;
+const static auto& patchStorageVolume = privilegeSetConfigureComponents;
+const static auto& postStorageVolume = privilegeSetConfigureComponents;
+const static auto& putStorageVolume = privilegeSetConfigureComponents;
+const static auto& deleteStorageVolume = privilegeSetConfigureComponents;
+
+// StorageVolumeCollection
+const static auto& getStorageVolumeCollection = privilegeSetLogin;
+const static auto& headStorageVolumeCollection = privilegeSetLogin;
+const static auto& patchStorageVolumeCollection = privilegeSetConfigureComponents;
+const static auto& postStorageVolumeCollection = privilegeSetConfigureComponents;
+const static auto& putStorageVolumeCollection = privilegeSetConfigureComponents;
+const static auto& deleteStorageVolumeCollection = privilegeSetConfigureComponents;
+
 // Switch
 const static auto& getSwitch = privilegeSetLogin;
 const static auto& headSwitch = privilegeSetLogin;
