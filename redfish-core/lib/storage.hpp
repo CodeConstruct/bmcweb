@@ -1706,6 +1706,7 @@ inline void securitySendAction(
         }
 
         // success
+        asyncResp->res.result(boost::beast::http::status::no_content);
         },
         *service, path,
         "xyz.openbmc_project.Inventory.Item.StorageControllerSecurity",
