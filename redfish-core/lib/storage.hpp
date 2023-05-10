@@ -2497,6 +2497,37 @@ inline void populateStorageVolume(
                           volBlockSize);
 }
 
+inline void
+    deleteStorageVolume(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                        const std::string& storageId,
+                        const std::string& connectionName,
+                        const std::string& path)
+{
+    crow::connections::systemBus->async_method_call(
+        [asyncResp, storageId](const boost::system::error_code ec,
+                               const sdbusplus::message_t& msg) {
+        // Failure returned from NVMe
+        const ::sd_bus_error* sd_err = msg.get_error();
+        if (sd_err)
+        {
+            storageAddDbusError(asyncResp->res, "delete Volume NVMe", storageId,
+                                sd_err->name, sd_err->message);
+            return;
+        }
+
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "delete Volume dbus error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        // success
+        asyncResp->res.result(boost::beast::http::status::no_content);
+        },
+        connectionName, path, "xyz.openbmc_project.Object.Delete", "Delete");
+}
+
 inline void findStorageVolume(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& storageId, const std::string& volumeId,
@@ -2940,6 +2971,35 @@ inline void storageVolumeCreateHandler(
     });
 }
 
+inline void storageVolumeDeleteHandler(
+    App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& systemName, const std::string& storageId,
+    const std::string& volumeId)
+{
+    BMCWEB_LOG_DEBUG << "delete handler vol " << volumeId;
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        BMCWEB_LOG_DEBUG << "Failed to setup Redfish Route for StorageVolume";
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        BMCWEB_LOG_DEBUG << "Failed to find ComputerSystem of " << systemName;
+        return;
+    }
+    findStorageVolume(
+        asyncResp, storageId, volumeId,
+        [asyncResp, storageId,
+         volumeId](const std::string& path, const std::string& connectionName,
+                   const dbus::utility::MapperServiceMap& ifaces) {
+        (void)ifaces;
+        deleteStorageVolume(asyncResp, storageId, connectionName, path);
+        });
+}
+
 inline void storageVolumeCollectionHandler(
     App& app, const crow::Request& req,
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
@@ -3145,6 +3205,11 @@ inline void requestRoutesStorageVolume(App& app)
         .privileges(redfish::privileges::getStorageVolume)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(storageVolumeHandler, std::ref(app)));
+
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/<str>")
+        .privileges(redfish::privileges::deleteStorageVolume)
+        .methods(boost::beast::http::verb::delete_)(
+            std::bind_front(storageVolumeDeleteHandler, std::ref(app)));
 }
 
 } // namespace redfish
