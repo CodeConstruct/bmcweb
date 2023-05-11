@@ -2237,43 +2237,68 @@ inline void populateStorageControllerCollection(
     asyncResp->res.jsonValue["Members"] = std::move(members);
 }
 
-void findStorage(
+inline void findStorage(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& storageId,
-    std::function<void(const sdbusplus::message::object_path& storagePath)> cb)
+    std::function<void(const sdbusplus::message::object_path& storagePath,
+                       const std::string& service)>
+        cb)
 {
     constexpr std::array<std::string_view, 1> interfaces = {
         "xyz.openbmc_project.Inventory.Item.Storage"};
     // mapper call chassis
-    dbus::utility::getSubTreePaths(
+    dbus::utility::getSubTree(
         "/xyz/openbmc_project/inventory", 0, interfaces,
         [asyncResp, storageId,
          cb](const boost::system::error_code& ec,
-             const dbus::utility::MapperGetSubTreePathsResponse& storageList) {
+             const dbus::utility::MapperGetSubTreeResponse& storageList) {
         if (ec)
         {
-            BMCWEB_LOG_DEBUG << "findStorageController DBUS response error";
+            BMCWEB_LOG_DEBUG << "findStorage DBUS response error";
             messages::resourceNotFound(asyncResp->res,
                                        "#Storage.v1_13_0.Storage", storageId);
             return;
         }
 
         auto storage = std::find_if(storageList.begin(), storageList.end(),
-                                    [&storageId](const std::string& path) {
+                                    [&storageId](auto& entry) {
+            const std::string& path = entry.first;
             return sdbusplus::message::object_path(path).filename() ==
                    storageId;
         });
         if (storage == storageList.end())
         {
-            BMCWEB_LOG_DEBUG << "findStorageController couldn't find "
-                             << storageId;
+            BMCWEB_LOG_DEBUG << "findStorage couldn't find " << storageId;
             messages::resourceNotFound(asyncResp->res,
                                        "#Storage.v1_13_0.Storage", storageId);
             return;
         }
+        const std::string& storagePath = storage->first;
 
-        cb(sdbusplus::message::object_path(*storage));
+        const auto& serviceMap = storage->second;
+        if (serviceMap.size() != 1)
+        {
+            BMCWEB_LOG_DEBUG << "findStorage multiple services for storage";
+            messages::resourceNotFound(asyncResp->res,
+                                       "#Storage.v1_13_0.Storage", storageId);
+        }
+        const std::string& serviceName = serviceMap.front().first;
+
+        cb(sdbusplus::message::object_path(storagePath), serviceName);
         });
+}
+
+inline void findStorage(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& storageId,
+    std::function<void(const sdbusplus::message::object_path& storagePath)> cb)
+{
+    findStorage(asyncResp, storageId,
+                [cb](const sdbusplus::message::object_path& storagePath,
+                     const std::string& service) {
+        (void)service;
+        cb(storagePath);
+    });
 }
 
 inline void storageControllerCollectionHandler(
