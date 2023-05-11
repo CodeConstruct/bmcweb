@@ -2560,6 +2560,252 @@ inline void findStorageVolume(
     });
 }
 
+inline void createVolumeSuccess(std::shared_ptr<task::TaskData> taskData,
+                                const std::string& service,
+                                const std::string& storageId,
+                                const std::string& progressPath)
+{
+    taskData->stopMonitor();
+
+    sdbusplus::asio::getProperty<sdbusplus::message::object_path>(
+        *crow::connections::systemBus, service, progressPath,
+        "xyz.openbmc_project.Nvme.CreateVolumeProgressSuccess", "VolumePath",
+        [taskData, storageId,
+         progressPath](const boost::system::error_code& ec,
+                       const sdbusplus::message::object_path& volumePath) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "createVolumeSuccess volumepath error " << ec;
+            taskData->messages.emplace_back(messages::internalError());
+            taskData->state = "Exception";
+            taskData->complete(
+                std::move(nlohmann::json()),
+                boost::beast::http::status::internal_server_error);
+            return;
+        }
+
+        auto resp = std::make_shared<bmcweb::AsyncResp>();
+        resp->res.setCompleteRequestHandler([taskData](crow::Response& res) {
+            if (res.result() == boost::beast::http::status::ok)
+            {
+                taskData->messages.emplace_back(messages::created());
+                taskData->state = "Completed";
+                taskData->complete(std::move(res.jsonValue),
+                                   boost::beast::http::status::created);
+            }
+            else
+            {
+                BMCWEB_LOG_DEBUG << "createVolumeSuccess error populating: "
+                                 << res.result();
+                BMCWEB_LOG_DEBUG << res.jsonValue;
+                taskData->messages.emplace_back(messages::internalError());
+                taskData->state = "Exception";
+                taskData->complete(
+                    std::move(nlohmann::json()),
+                    boost::beast::http::status::internal_server_error);
+            }
+        });
+
+        auto volumeId = volumePath.filename();
+
+        findStorageVolume(resp, storageId, volumeId,
+                          [resp, storageId, volumeId](
+                              const std::string& path,
+                              const std::string& connectionName,
+                              const dbus::utility::MapperServiceMap& ifaces) {
+            BMCWEB_LOG_DEBUG << "createVolumeSuccess connectionName is "
+                             << connectionName;
+            populateStorageVolume(resp, storageId, volumeId, connectionName,
+                                  path, ifaces);
+            // on completion completeRequestHandler above will copy the response
+            // to taskData
+        });
+        });
+}
+
+inline void createVolumeFailure(std::shared_ptr<task::TaskData> taskData,
+                                const std::string& service,
+                                const std::string& storageId,
+                                const std::string& progressPath)
+{
+    taskData->stopMonitor();
+
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, service, progressPath,
+        "xyz.openbmc_project.Nvme.CreateVolumeProgressFailure",
+        [taskData,
+         storageId](const boost::system::error_code& ec,
+                    const std::vector<std::pair<
+                        std::string, dbus::utility::DbusVariantType>>& props) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "createVolumeSuccess volumepath error " << ec;
+            taskData->messages.emplace_back(messages::internalError());
+            taskData->state = "Exception";
+            taskData->complete(
+                std::move(nlohmann::json()),
+                boost::beast::http::status::internal_server_error);
+            return;
+        }
+
+        std::string errorName;
+        std::string errorDesc;
+        sdbusplus::unpackPropertiesNoThrow(dbus_utils::UnpackErrorPrinter(),
+                                           props, "ErrorName", errorName,
+                                           "ErrorDescription", errorDesc);
+        bmcweb::AsyncResp resp;
+        storageAddDbusError(resp.res, "createVolumeFailure", storageId,
+                            errorName, errorDesc);
+        for (auto& m : resp.res.jsonValue["error"][messages::messageAnnotation])
+        {
+            taskData->messages.emplace_back(m);
+        }
+
+        taskData->state = "Exception";
+        taskData->complete(std::move(resp.res.jsonValue), resp.res.result());
+        });
+}
+
+// Handles the Status property of Common.Progress interface
+inline void createVolumeTaskUpdate(const std::string& status,
+                                   std::shared_ptr<task::TaskData> taskData,
+                                   const std::string& service,
+                                   const std::string& storageId,
+                                   const std::string& progressPath)
+{
+    if (status ==
+        "xyz.openbmc_project.Common.Progress.OperationStatus.InProgress")
+    {
+        // nothing to do
+    }
+    else if (status ==
+             "xyz.openbmc_project.Common.Progress.OperationStatus.Completed")
+    {
+        createVolumeSuccess(taskData, service, storageId, progressPath);
+    }
+    else if (status ==
+                 "xyz.openbmc_project.Common.Progress.OperationStatus.Failed" ||
+             status ==
+                 "xyz.openbmc_project.Common.Progress.OperationStatus.Aborted")
+    {
+        createVolumeFailure(taskData, service, storageId, progressPath);
+    }
+    else
+    {
+        BMCWEB_LOG_DEBUG << "updateCreateVolumeTask unexpected state "
+                         << status;
+    }
+}
+
+// Handler called by TaskData on Commmon.Progress property change
+inline bool createVolumeTaskHandler(sdbusplus::message_t& msg,
+                                    std::shared_ptr<task::TaskData> taskData,
+                                    const std::string& service,
+                                    const std::string& storageId,
+                                    const std::string& progressPath)
+{
+    dbus::utility::DBusPropertiesMap props;
+    std::string iface;
+    msg.read(iface, props);
+
+    if (iface != "xyz.openbmc_project.Common.Progress")
+    {
+        BMCWEB_LOG_DEBUG << "updateCreateVolumeTask wrong interface";
+        return !task::completed;
+    }
+
+    std::optional<std::string> status;
+    sdbusplus::unpackPropertiesNoThrow(dbus_utils::UnpackErrorPrinter(), props,
+                                       "Status", status);
+    if (!status)
+    {
+        BMCWEB_LOG_DEBUG << "updateCreateVolumeTask not status update";
+        return !task::completed;
+    }
+
+    createVolumeTaskUpdate(*status, taskData, service, storageId, progressPath);
+    // completion is handled asynchronously so always return !completed
+    return !task::completed;
+}
+
+inline void
+    createStorageVolume(const crow::Request& req,
+                        const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                        const std::string& storagePath,
+                        const std::string& storageService, uint64_t size,
+                        size_t lbaIndex, bool metadataAtEnd)
+{
+    auto storageId = sdbusplus::message::object_path(storagePath).filename();
+    crow::connections::systemBus->async_method_call(
+        [req, asyncResp, storageId, storageService](
+            const boost::system::error_code ec, const sdbusplus::message_t& msg,
+            const sdbusplus::message::object_path& progressPath) {
+        const ::sd_bus_error* sd_err = msg.get_error();
+        if (sd_err)
+        {
+            storageAddDbusError(asyncResp->res, "create Volume NVMe", storageId,
+                                sd_err->name, sd_err->message);
+            return;
+        }
+
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "create Volume dbus error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        // success
+        BMCWEB_LOG_DEBUG << "create volume success, progress path "
+                         << progressPath.str;
+        std::shared_ptr<task::TaskData> task = task::TaskData::createTask(
+            [storageService, storageId,
+             progressPath](const boost::system::error_code& err,
+                           sdbusplus::message_t& taskMsg,
+                           const std::shared_ptr<task::TaskData>& taskData) {
+            if (err)
+            {
+                // Internal error in property signal callback?
+                BMCWEB_LOG_ERROR << progressPath.str << ": Error in task";
+                taskData->messages.emplace_back(messages::internalError());
+                taskData->state = "Cancelled";
+                return task::completed;
+            }
+
+            return createVolumeTaskHandler(taskMsg, taskData, storageService,
+                                           storageId, progressPath);
+            },
+            "type='signal',interface='org.freedesktop.DBus.Properties',"
+            "member='PropertiesChanged',arg0='xyz.openbmc_project.Common.Progress',"
+            "path='" +
+                progressPath.str + "'");
+
+        task->startTimer(std::chrono::minutes(60));
+        task->populateResp(asyncResp->res);
+        task->payload.emplace(req);
+
+        // Progress may have completed prior to Task watching for signals, so
+        // poll Status once.
+        sdbusplus::asio::getProperty<sdbusplus::message::object_path>(
+            *crow::connections::systemBus, storageService, progressPath,
+            "xyz.openbmc_project.Common.Progress", "Status",
+            [task, storageService, storageId,
+             progressPath](const boost::system::error_code& ec2,
+                           const sdbusplus::message::object_path& status) {
+            if (ec2)
+            {
+                BMCWEB_LOG_DEBUG << "createVolume poll error: " << ec2;
+                return;
+            }
+
+            createVolumeTaskUpdate(status.str, task, storageService, storageId,
+                                   progressPath);
+            });
+        },
+        storageService, storagePath, "xyz.openbmc_project.Nvme.Storage",
+        "CreateVolume", size, lbaIndex, metadataAtEnd);
+}
+
 inline void populateStorageVolumeCollection(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const boost::system::error_code& ec, const std::string& storageId,
@@ -2619,6 +2865,79 @@ inline void
         populateStorageVolume(asyncResp, storageId, volumeId, connectionName,
                               path, ifaces);
         });
+}
+
+std::optional<size_t> parseLbaFormatType(std::string_view ty)
+{
+    // expects LBAFormat0, LBAFormat1 etc
+    if (!ty.starts_with("LBAFormat"))
+    {
+        BMCWEB_LOG_DEBUG << "wrong start";
+        return std::nullopt;
+    }
+
+    ty.remove_prefix(std::min(ty.size(), strlen("LBAFormat")));
+
+    size_t v;
+    auto e = std::from_chars(ty.data(), ty.data() + ty.size(), v);
+    if (e.ptr != ty.data() + ty.size() || e.ec != std::errc())
+    {
+        return std::nullopt;
+    }
+    return v;
+}
+
+inline void storageVolumeCreateHandler(
+    App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& systemName, const std::string& storageId)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        BMCWEB_LOG_DEBUG << "Failed to setup Redfish Route for StorageVolume";
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        BMCWEB_LOG_DEBUG << "Failed to find ComputerSystem of " << systemName;
+        return;
+    }
+
+    uint64_t size;
+    std::string lbaFormat;
+    // allow to default, non-metadata formats ignore the parameter
+    std::optional<bool> metadataAtEnd = false;
+    std::optional<std::string> name;
+
+    if (!json_util::readJsonAction(
+            req, asyncResp->res, "Name", name, "Capacity/Data/ProvisionedBytes",
+            size, "NVMeNamespaceProperties/LBAFormat/LBAFormatType", lbaFormat,
+            "NVMeNamespaceProperties/LBAFormat/MetadataTransferredAtEndOfDataLBA",
+            metadataAtEnd))
+    {
+        BMCWEB_LOG_DEBUG << "create volume json input failed";
+        return;
+    }
+
+    std::optional<size_t> lbaIndex = parseLbaFormatType(lbaFormat);
+    if (!lbaIndex)
+    {
+        BMCWEB_LOG_DEBUG << "Bad parsing lbaFormatType";
+        messages::propertyValueNotInList(
+            asyncResp->res, lbaFormat,
+            "NVMeNamespaceProperties.LBAFormat.LBAFormatType");
+        return;
+    }
+
+    findStorage(asyncResp, storageId,
+                [req, asyncResp, size, lbaIndex, metadataAtEnd](
+                    const sdbusplus::message::object_path& storagePath,
+                    const std::string& storageService) {
+        createStorageVolume(req, asyncResp, storagePath, storageService, size,
+                            *lbaIndex, *metadataAtEnd);
+    });
 }
 
 inline void storageVolumeCollectionHandler(
@@ -2807,6 +3126,12 @@ inline void requestRoutesStorageVolumeCollection(App& app)
         .privileges(redfish::privileges::getStorageVolumeCollection)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(storageVolumeCollectionHandler, std::ref(app)));
+
+    BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/")
+        .privileges(redfish::privileges::postStorageVolumeCollection)
+        .methods(boost::beast::http::verb::post)(
+            std::bind_front(storageVolumeCreateHandler, std::ref(app)));
+
     BMCWEB_ROUTE(app,
                  "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/Capabilities")
         .privileges(redfish::privileges::getStorageVolumeCollection)
