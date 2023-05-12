@@ -156,10 +156,14 @@ struct TaskData : std::enable_shared_from_this<TaskData>
             res.addHeader(boost::beast::http::field::retry_after,
                           std::to_string(retryAfterSeconds));
         }
-        else if (!gave204)
+        else if (!gaveResult)
         {
-            res.result(boost::beast::http::status::no_content);
-            gave204 = true;
+            if (result)
+            {
+                res.jsonValue = *result;
+            }
+            res.result(resultHttpStatus);
+            gaveResult = true;
         }
     }
 
@@ -267,6 +271,33 @@ struct TaskData : std::enable_shared_from_this<TaskData>
         }
     }
 
+    // Can be called manually by task handlers implementing asynchronous
+    // completion. They must also call stopMonitor() (probably prior to
+    // complete()).
+    void complete()
+    {
+        timer.cancel();
+        finishTask();
+
+        // Send event
+        sendTaskEvent(state, index);
+    }
+
+    void complete(nlohmann::json&& outputResult,
+                  boost::beast::http::status httpStatus)
+    {
+        result = std::move(outputResult);
+        resultHttpStatus = httpStatus;
+        complete();
+    }
+
+    // Stop watching for property changes. Only required to be called by users
+    // when handling calling complete() manually too.
+    void stopMonitor()
+    {
+        match.reset();
+    }
+
     void startTimer(const std::chrono::seconds& timeout)
     {
         if (match)
@@ -283,17 +314,8 @@ struct TaskData : std::enable_shared_from_this<TaskData>
             // to update status itself if needed
             if (self->callback(ec, message, self) == task::completed)
             {
-                self->timer.cancel();
-                self->finishTask();
-
-                // Send event
-                self->sendTaskEvent(self->state, self->index);
-
-                // reset the match after the callback was successful
-                boost::asio::post(
-                    crow::connections::systemBus->get_io_context(),
-                    [self] { self->match.reset(); });
-                return;
+                self->stopMonitor();
+                self->complete();
             }
             });
 
@@ -316,7 +338,10 @@ struct TaskData : std::enable_shared_from_this<TaskData>
     std::unique_ptr<sdbusplus::bus::match_t> match;
     std::optional<time_t> endTime;
     std::optional<Payload> payload;
-    bool gave204 = false;
+    std::optional<nlohmann::json> result;
+    boost::beast::http::status resultHttpStatus =
+        boost::beast::http::status::no_content;
+    bool gaveResult = false;
     int percentComplete = 0;
 };
 
@@ -353,8 +378,8 @@ inline void requestRoutesTaskMonitor(App& app)
             return;
         }
         std::shared_ptr<task::TaskData>& ptr = *find;
-        // monitor expires after 204
-        if (ptr->gave204)
+        // monitor expires after result
+        if (ptr->gaveResult)
         {
             messages::resourceNotFound(asyncResp->res, "Task", strParam);
             return;
@@ -411,7 +436,7 @@ inline void requestRoutesTask(App& app)
         asyncResp->res.jsonValue["Messages"] = ptr->messages;
         asyncResp->res.jsonValue["@odata.id"] = crow::utility::urlFromPieces(
             "redfish", "v1", "TaskService", "Tasks", strParam);
-        if (!ptr->gave204)
+        if (!ptr->gaveResult)
         {
             asyncResp->res.jsonValue["TaskMonitor"] =
                 "/redfish/v1/TaskService/Tasks/" + strParam + "/Monitor";
