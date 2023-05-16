@@ -36,6 +36,59 @@
 
 namespace redfish
 {
+
+/* Converts a NVMe dbus error to a redfish equivalent, adds to the response */
+inline void storageAddDbusError(crow::Response& res, std::string_view func,
+                                const std::string& storageId,
+                                std::string_view errorName,
+                                std::string_view errorDesc)
+{
+    (void)storageId;
+
+    crow::Response err;
+
+    BMCWEB_LOG_DEBUG << func << " " << errorName << ", " << errorDesc;
+    if (errorName == "xyz.openbmc_project.Common.Error.TooManyResources")
+    {
+        messages::createLimitReachedForResource(err);
+    }
+    else if (errorName == "xyz.openbmc_project.Common.Error.InvalidArgument")
+    {
+        messages::propertyValueError(err, "");
+    }
+    else if (errorName ==
+             "xyz.openbmc_project.Common.Error.DeviceOperationFailed")
+    {
+        messages::operationFailed(err);
+    }
+    else if (errorName == "xyz.openbmc_project.Common.Error.UnsupportedRequest")
+    {
+        messages::operationFailed(err);
+    }
+    else
+    {
+        messages::internalError(err);
+    }
+
+    // Some messages have "error" toplevel, others have "@Message.ExtendedInfo"
+    // (addMessageToErrorJson() versus addMessageToJson()). Choose which.
+    nlohmann::json extInfo;
+    if (err.jsonValue.contains("error"))
+    {
+        extInfo = err.jsonValue["error"][messages::messageAnnotation][0];
+    }
+    else
+    {
+        extInfo = err.jsonValue[messages::messageAnnotation][0];
+    }
+
+    // Keep the specific error message provided from the NVMe software.
+    extInfo["Message"] = errorDesc;
+
+    messages::moveErrorsToErrorJson(res.jsonValue, extInfo);
+    res.result(boost::beast::http::status::bad_request);
+}
+
 inline void requestRoutesStorageCollection(App& app)
 {
     BMCWEB_ROUTE(app, "/redfish/v1/Systems/<str>/Storage/")
