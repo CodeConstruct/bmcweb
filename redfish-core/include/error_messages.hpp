@@ -76,6 +76,20 @@ nlohmann::json resourceMissingAtURI(boost::urls::url_view arg1);
 void resourceMissingAtURI(crow::Response& res, boost::urls::url_view arg1);
 
 /**
+ * @brief Formats ActionParameterValueError message into JSON
+ * Message body: "The value for the parameter %1 in the action %2 is invalid."
+ *
+ * @param[in] arg1 Parameter of message that will replace %1 in its body.
+ * @param[in] arg2 Parameter of message that will replace %2 in its body.
+ *
+ * @returns Message ActionParameterValueError formatted to JSON */
+nlohmann::json actionParameterValueError(std::string_view arg1,
+                                         std::string_view arg2);
+
+void actionParameterValueError(crow::Response& res, std::string_view arg1,
+                               std::string_view arg2);
+
+/**
  * @brief Formats ActionParameterValueFormatError message into JSON
  * Message body: "The value <arg1> for the parameter <arg2> in the action <arg3>
  * is of a different format than the parameter can accept."
@@ -238,6 +252,17 @@ nlohmann::json createFailedMissingReqProperties(std::string_view arg1);
 
 void createFailedMissingReqProperties(crow::Response& res,
                                       std::string_view arg1);
+
+/**
+ * @brief Formats PropertyValueError message into JSON
+ * Message body: "The value provided for the property %1 is not valid."
+ *
+ * @param[in] arg1 Parameter of message that will replace %1 in its body.
+ *
+ * @returns Message PropertyValueFormatError formatted to JSON */
+nlohmann::json propertyValueError(std::string_view arg1);
+
+void propertyValueError(crow::Response& res, std::string_view arg1);
 
 /**
  * @brief Formats PropertyValueFormatError message into JSON
@@ -818,6 +843,17 @@ void noValidSession(crow::Response& res);
 nlohmann::json invalidObject(boost::urls::url_view arg1);
 
 void invalidObject(crow::Response& res, boost::urls::url_view arg1);
+
+/**
+ * @brief Formats InvalidURI message into JSON
+ * Message body: "The URI %1 was not found."
+ *
+ * @param[in] arg1 Parameter of message that will replace %1 in its body.
+ *
+ * @returns Message InvalidURI formatted to JSON */
+nlohmann::json invalidURI(boost::urls::url_view arg1);
+
+void invalidURI(crow::Response& res, boost::urls::url_view arg1);
 
 /**
  * @brief Formats ResourceInStandby message into JSON

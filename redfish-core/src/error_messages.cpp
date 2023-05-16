@@ -215,6 +215,26 @@ void resourceMissingAtURI(crow::Response& res, boost::urls::url_view arg1)
     res.result(boost::beast::http::status::bad_request);
     addMessageToErrorJson(res.jsonValue, resourceMissingAtURI(arg1));
 }
+/**
+ * @internal
+ * @brief Formats ActionParameterValueError message into JSON
+ *
+ * See header file for more information
+ * @endinternal
+ */
+nlohmann::json actionParameterValueError(std::string_view arg1,
+                                         std::string_view arg2)
+{
+    return getLog(redfish::registries::base::Index::actionParameterValueError,
+                  std::to_array({arg1, arg2}));
+}
+
+void actionParameterValueError(crow::Response& res, std::string_view arg1,
+                               std::string_view arg2)
+{
+    res.result(boost::beast::http::status::bad_request);
+    addMessageToErrorJson(res.jsonValue, actionParameterValueError(arg1, arg2));
+}
 
 /**
  * @internal
@@ -468,6 +488,25 @@ void createFailedMissingReqProperties(crow::Response& res,
     res.result(boost::beast::http::status::bad_request);
     addMessageToJson(res.jsonValue, createFailedMissingReqProperties(arg1),
                      arg1);
+}
+/**
+ * @internal
+ * @brief Formats PropertyValueError message into JSON for the specified
+ * property
+ *
+ * See header file for more information
+ * @endinternal
+ */
+nlohmann::json propertyValueError(std::string_view arg1)
+{
+    return getLog(redfish::registries::base::Index::propertyValueError,
+                  std::to_array({arg1}));
+}
+
+void propertyValueError(crow::Response& res, std::string_view arg1)
+{
+    res.result(boost::beast::http::status::bad_request);
+    addMessageToJson(res.jsonValue, propertyValueError(arg1), arg1);
 }
 
 /**
@@ -1379,6 +1418,25 @@ void invalidObject(crow::Response& res, boost::urls::url_view arg1)
 {
     res.result(boost::beast::http::status::bad_request);
     addMessageToErrorJson(res.jsonValue, invalidObject(arg1));
+}
+
+/**
+ * @internal
+ * @brief Formats InvalidURI message into JSON
+ *
+ * See header file for more information
+ * @endinternal
+ */
+nlohmann::json invalidURI(boost::urls::url_view arg1)
+{
+    return getLog(redfish::registries::base::Index::invalidURI,
+                  std::to_array<std::string_view>({arg1.buffer()}));
+}
+
+void invalidURI(crow::Response& res, boost::urls::url_view arg1)
+{
+    res.result(boost::beast::http::status::bad_request);
+    addMessageToErrorJson(res.jsonValue, invalidURI(arg1));
 }
 
 /**
