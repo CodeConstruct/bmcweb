@@ -30,6 +30,7 @@
 #include <sdbusplus/unpack_properties.hpp>
 #include <utils/location_utils.hpp>
 
+#include <algorithm>
 #include <array>
 #include <string_view>
 #include <unordered_set>
@@ -2078,6 +2079,348 @@ inline static void
         });
 }
 
+inline void
+    storagePatchWarthogOem(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                           const std::string& storageId,
+                           const std::string& controllerId,
+                           nlohmann::json& warthogOem)
+{
+    findStorageController(asyncResp, storageId, controllerId,
+                          [asyncResp, storageId, controllerId,
+                           warthogOem](const std::string& path,
+                                       const dbus::utility::MapperServiceMap&) {
+        if (warthogOem.contains("MorristownOtpWriteEnable"))
+        {
+            setWarthogOemGpio(asyncResp, path, "MorristownOtpWriteEnable",
+                              warthogOem["MorristownOtpWriteEnable"]);
+        }
+        if (warthogOem.contains("TriggerPowerCycle"))
+        {
+            setWarthogOemGpio(asyncResp, path, "TriggerPowerCycle",
+                              warthogOem["TriggerPowerCycle"]);
+        }
+        if (warthogOem.contains("DisableWatchdog"))
+        {
+            setWarthogOemGpio(asyncResp, path, "DisableWatchdog",
+                              warthogOem["DisableWatchdog"]);
+        }
+        if (warthogOem.contains("TriggerReset"))
+        {
+            setWarthogOemGpio(asyncResp, path, "TriggerReset",
+                              warthogOem["TriggerReset"]);
+        }
+        if (warthogOem.contains("CpldReset"))
+        {
+            setWarthogOemGpio(asyncResp, path, "CpldReset",
+                              warthogOem["CpldReset"]);
+        }
+        if (warthogOem.contains("SpiImgSelect"))
+        {
+            setWarthogSpiImage(asyncResp, path, "SpiImgSelect",
+                               warthogOem["SpiImgSelect"]);
+        }
+    });
+}
+
+// Performs storage attach and detach operations.
+// Will be called pseudo-recursively (asio dbus callbacks) to perform
+// the operations.
+inline void storageApplyAttachDetach(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& connectionName, const std::string& controllerPath,
+    std::shared_ptr<std::vector<std::string>> attaches,
+    std::shared_ptr<std::vector<std::string>> detaches)
+{
+    if (!detaches->empty())
+    {
+        sdbusplus::message::object_path v = detaches->back();
+        detaches->pop_back();
+        BMCWEB_LOG_DEBUG << "detaching " << v.str << " from " << controllerPath
+                         << "\n";
+        crow::connections::systemBus->async_method_call(
+            [asyncResp, connectionName, controllerPath, attaches,
+             detaches](const boost::system::error_code ec,
+                       const sdbusplus::message_t& msg) {
+            // Failure returned from NVMe
+            const ::sd_bus_error* sd_err = msg.get_error();
+            if (sd_err)
+            {
+                // TODO remove "" argument
+                storageAddDbusError(asyncResp->res, "detach volume NVMe", "",
+                                    sd_err->name, sd_err->message);
+                return;
+            }
+
+            if (ec)
+            {
+                BMCWEB_LOG_DEBUG << "detach volume dbus error " << ec;
+                messages::internalError(asyncResp->res);
+                return;
+            }
+
+            // "recurse"
+            storageApplyAttachDetach(asyncResp, connectionName, controllerPath,
+                                     attaches, detaches);
+            },
+            connectionName, controllerPath,
+            "xyz.openbmc_project.Inventory.Item.StorageController",
+            "DetachVolume", v);
+        return;
+    }
+
+    if (!attaches->empty())
+    {
+        sdbusplus::message::object_path v = attaches->back();
+        attaches->pop_back();
+        BMCWEB_LOG_DEBUG << "attaching " << v.str << " to " << controllerPath
+                         << "\n";
+        crow::connections::systemBus->async_method_call(
+            [asyncResp, connectionName, controllerPath, attaches,
+             detaches](const boost::system::error_code ec,
+                       const sdbusplus::message_t& msg) {
+            // Failure returned from NVMe
+            const ::sd_bus_error* sd_err = msg.get_error();
+            if (sd_err)
+            {
+                // TODO remove "" argument
+                storageAddDbusError(asyncResp->res, "attach volume NVMe", "",
+                                    sd_err->name, sd_err->message);
+                return;
+            }
+
+            if (ec)
+            {
+                BMCWEB_LOG_DEBUG << "attach volume dbus error " << ec;
+                messages::internalError(asyncResp->res);
+                return;
+            }
+
+            // "recurse"
+            storageApplyAttachDetach(asyncResp, connectionName, controllerPath,
+                                     attaches, detaches);
+            },
+            connectionName, controllerPath,
+            "xyz.openbmc_project.Inventory.Item.StorageController",
+            "AttachVolume", v);
+        return;
+    }
+
+    // both lists are complete, return success with the controller.
+    constexpr std::array<std::string_view, 1> interfaces = {
+        "xyz.openbmc_project.Inventory.Item.StorageController"};
+    dbus::utility::getDbusObject(
+        controllerPath, interfaces,
+        [asyncResp, connectionName,
+         controllerPath](const boost::system::error_code& ec,
+                         const dbus::utility::MapperGetObject& interfaceDict) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "attach volume get controller dbus error "
+                             << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        if (interfaceDict.size() != 1)
+        {
+            BMCWEB_LOG_DEBUG << "attachdetach extra services";
+            for (auto x : interfaceDict)
+            {
+                BMCWEB_LOG_DEBUG << "if " << x.first;
+            }
+            messages::internalError(asyncResp->res);
+        }
+
+        auto c = sdbusplus::message::object_path(controllerPath);
+        std::string storageId = c.parent_path().parent_path().filename();
+        std::string controllerId = c.filename();
+        populateStorageController(asyncResp, storageId, controllerId,
+                                  connectionName, controllerPath, interfaceDict,
+                                  interfaceDict.front().second);
+        });
+}
+
+inline void storagePatchAttachedVolumes(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& storageId, const std::string& controllerId,
+    std::vector<std::string>& updateVolumeURIs)
+{
+    // vector of {parsed storageId, URI}
+    std::vector<std::pair<std::string, std::string>> updateVolIDs;
+    for (auto& u : updateVolumeURIs)
+    {
+        boost::urls::result<boost::urls::url_view> parsedUrl =
+            boost::urls::parse_relative_ref(u);
+        if (!parsedUrl)
+        {
+            BMCWEB_LOG_DEBUG << "bad attached volume URI " << u;
+            messages::invalidURI(asyncResp->res, u);
+            return;
+        }
+        std::string urlStorageId;
+        std::string volumeId;
+        if (!crow::utility::readUrlSegments(
+                *parsedUrl, "redfish", "v1", "Systems", "system", "Storage",
+                std::ref(urlStorageId), "Volumes", std::ref(volumeId)))
+        {
+            BMCWEB_LOG_DEBUG << "bad attached volume URI " << u;
+            messages::invalidURI(asyncResp->res, u);
+            return;
+        }
+
+        if (urlStorageId != storageId)
+        {
+            BMCWEB_LOG_DEBUG << "bad attached volume URI " << u;
+            messages::invalidURI(asyncResp->res, u);
+            return;
+        }
+
+        updateVolIDs.push_back({volumeId, u});
+    }
+
+    findStorageController(asyncResp, storageId, controllerId,
+                          [asyncResp, updateVolIDs](
+                              const std::string& controllerPath,
+                              const dbus::utility::MapperServiceMap& ifaces) {
+        auto& connectionName = ifaces.front().first;
+
+        // Create dbus paths to update. Elements are {dbus_path, URI}
+        std::vector<std::pair<std::string, std::string>> updateVolumes;
+        auto storagePath = sdbusplus::message::object_path(controllerPath)
+                               .parent_path()
+                               .parent_path();
+        for (auto& [u, uri] : updateVolIDs)
+        {
+            updateVolumes.push_back({(storagePath / "volumes" / u).str, uri});
+        }
+        std::sort(updateVolumes.begin(), updateVolumes.end());
+
+        // Get list of available volumes
+        storageVolumes(
+            storagePath,
+            [asyncResp, updateVolumes, connectionName,
+             controllerPath](const boost::system::error_code& ec,
+                             const std::vector<std::string>& volPaths) {
+            if (ec)
+            {
+                BMCWEB_LOG_DEBUG
+                    << "patch attached volumes list volumes failed";
+                messages::internalError(asyncResp->res);
+                return;
+            }
+
+            for (auto& a : volPaths)
+            {
+                BMCWEB_LOG_DEBUG << "vol is " << a;
+            }
+
+            std::vector<std::string> updatePaths;
+            // Early check for bad volume paths
+            for (auto& [u, uri] : updateVolumes)
+            {
+                if (std::find(volPaths.begin(), volPaths.end(), u) ==
+                    volPaths.end())
+                {
+                    BMCWEB_LOG_DEBUG << "patch volume not found " << uri;
+                    messages::invalidURI(asyncResp->res, uri);
+                    return;
+                }
+                updatePaths.emplace_back(u);
+            }
+
+            // Fetch currently attached volumes
+            storageCtrlAttachedVolumes(
+                controllerPath,
+                [asyncResp, updatePaths, connectionName,
+                 controllerPath](const boost::system::error_code& ec2,
+                                 const std::vector<std::string>& ex) {
+                if (ec2)
+                {
+                    BMCWEB_LOG_DEBUG
+                        << "patch attached volumes list attached failed";
+                    messages::internalError(asyncResp->res);
+                    return;
+                }
+
+                // Find changes
+                auto attaches = std::make_shared<std::vector<std::string>>();
+                auto detaches = std::make_shared<std::vector<std::string>>();
+                std::vector<std::string> existing(ex);
+                std::sort(existing.begin(), existing.end());
+                std::set_difference(updatePaths.begin(), updatePaths.end(),
+                                    existing.begin(), existing.end(),
+                                    std::back_inserter(*attaches));
+
+                std::set_difference(existing.begin(), existing.end(),
+                                    updatePaths.begin(), updatePaths.end(),
+                                    std::back_inserter(*detaches));
+
+                // Apply
+                storageApplyAttachDetach(asyncResp, connectionName,
+                                         controllerPath, attaches, detaches);
+                });
+            });
+    });
+}
+
+inline void
+    storagePatchController(App& app, const crow::Request& req,
+                           const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                           const std::string& systemName,
+                           const std::string& storageId,
+                           const std::string& controllerId)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        return;
+    }
+
+    std::optional<nlohmann::json> warthogOem;
+    std::optional<std::vector<std::string>> attachedVolumes;
+    if (!json_util::readJsonPatch(req, asyncResp->res, "Links/AttachedVolumes",
+                                  attachedVolumes, "Links/Oem/Google/Warthog",
+                                  warthogOem))
+    {
+        BMCWEB_LOG_DEBUG << "Bad controller patch input";
+        return;
+    }
+
+    if (warthogOem && attachedVolumes)
+    {
+        BMCWEB_LOG_DEBUG << "Multiple values to controller patch";
+        messages::generalError(asyncResp->res);
+        asyncResp->res.jsonValue["error"]["message"] =
+            "PATCH may only alter one resource type";
+        return;
+    }
+
+    if (!(warthogOem || attachedVolumes))
+    {
+        BMCWEB_LOG_DEBUG << "No values to controller patch";
+        messages::noOperation(asyncResp->res);
+        return;
+    }
+
+    if (warthogOem)
+    {
+        storagePatchWarthogOem(asyncResp, storageId, controllerId, *warthogOem);
+    }
+
+    if (attachedVolumes)
+    {
+        storagePatchAttachedVolumes(asyncResp, storageId, controllerId,
+                                    *attachedVolumes);
+    }
+
+    // TODO: we should setCompleteRequestHandler to return the modified
+    // StorageController on completion, rather than handling in attachedVolumes.
+}
+
 inline void requestRoutesStorageControllerActions(App& app)
 {
     BMCWEB_ROUTE(
@@ -2173,60 +2516,8 @@ inline void requestRoutesStorageControllerActions(App& app)
                    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                    const std::string& systemName, const std::string& storageId,
                    const std::string& controllerId) {
-        if (!redfish::setUpRedfishRoute(app, req, asyncResp))
-        {
-            return;
-        }
-        if (systemName != "system")
-        {
-            messages::resourceNotFound(asyncResp->res, "ComputerSystem",
-                                       systemName);
-            return;
-        }
-
-        nlohmann::json warthogOem;
-        if (!json_util::readJsonPatch(req, asyncResp->res,
-                                      "Links/Oem/Google/Warthog", warthogOem))
-        {
-            BMCWEB_LOG_DEBUG << "Warthog OEM is not in the patch input";
-            return;
-        }
-
-        findStorageController(asyncResp, storageId, controllerId,
-                              [asyncResp, storageId, controllerId, warthogOem](
-                                  const std::string& path,
-                                  const dbus::utility::MapperServiceMap&) {
-            if (warthogOem.contains("MorristownOtpWriteEnable"))
-            {
-                setWarthogOemGpio(asyncResp, path, "MorristownOtpWriteEnable",
-                                  warthogOem["MorristownOtpWriteEnable"]);
-            }
-            if (warthogOem.contains("TriggerPowerCycle"))
-            {
-                setWarthogOemGpio(asyncResp, path, "TriggerPowerCycle",
-                                  warthogOem["TriggerPowerCycle"]);
-            }
-            if (warthogOem.contains("DisableWatchdog"))
-            {
-                setWarthogOemGpio(asyncResp, path, "DisableWatchdog",
-                                  warthogOem["DisableWatchdog"]);
-            }
-            if (warthogOem.contains("TriggerReset"))
-            {
-                setWarthogOemGpio(asyncResp, path, "TriggerReset",
-                                  warthogOem["TriggerReset"]);
-            }
-            if (warthogOem.contains("CpldReset"))
-            {
-                setWarthogOemGpio(asyncResp, path, "CpldReset",
-                                  warthogOem["CpldReset"]);
-            }
-            if (warthogOem.contains("SpiImgSelect"))
-            {
-                setWarthogSpiImage(asyncResp, path, "SpiImgSelect",
-                                   warthogOem["SpiImgSelect"]);
-            }
-        });
+        storagePatchController(app, req, asyncResp, systemName, storageId,
+                               controllerId);
         });
 }
 
