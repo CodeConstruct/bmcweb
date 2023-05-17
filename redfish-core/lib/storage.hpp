@@ -1737,6 +1737,107 @@ inline void tryPopulateControllerSecurity(
     actions["#StorageController.SecurityReceive"]["target"] = receiveUrl;
 }
 
+inline void storageCtrlAttachedVolumes(
+    const sdbusplus::message::object_path& controllerPath,
+    std::function<void(const boost::system::error_code& ec,
+                       const std::vector<std::string>& volPaths)>
+        cb)
+{
+    // Get list of attached volumes
+    constexpr std::array<std::string_view, 1> interfaces = {
+        "xyz.openbmc_project.Inventory.Item.Volume"};
+    dbus::utility::getAssociatedSubTreePaths(
+        controllerPath / "attaching",
+        sdbusplus::message::object_path("/xyz/openbmc_project/inventory"), 0,
+        interfaces,
+        [cb](const boost::system::error_code& ec,
+             const std::vector<std::string>& volPaths) { cb(ec, volPaths); });
+}
+
+inline void storageVolumes(
+    const sdbusplus::message::object_path& storagePath,
+    std::function<void(const boost::system::error_code& ec,
+                       const std::vector<std::string>& volPaths)>&& cb)
+{
+    // Get list of attached volumes
+    constexpr std::array<std::string_view, 1> interfaces = {
+        "xyz.openbmc_project.Inventory.Item.Volume"};
+    dbus::utility::getAssociatedSubTreePaths(
+        storagePath / "containing",
+        sdbusplus::message::object_path("/xyz/openbmc_project/inventory"), 0,
+        interfaces,
+        [cb](const boost::system::error_code& ec,
+             const std::vector<std::string>& volPaths) { cb(ec, volPaths); });
+}
+
+inline void populateStorageControllerAttached(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& path)
+{
+    storageCtrlAttachedVolumes(
+        path, [asyncResp](const boost::system::error_code& ec,
+                          const std::vector<std::string>& attached) {
+            if (ec)
+            {
+                BMCWEB_LOG_DEBUG << "populating attached volumes failed";
+                messages::internalError(asyncResp->res);
+                return;
+            }
+            asyncResp->res.jsonValue["Links"]["AttachedVolumes"] = attached;
+        });
+}
+
+inline void populateStorageController(
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& storageId, const std::string& controllerId,
+    const std::string& connectionName, const std::string& path,
+    const dbus::utility::MapperServiceMap& ifaces,
+    const std::vector<std::string>& interfaces)
+{
+    asyncResp->res.jsonValue["@odata.type"] =
+        "#StorageController.v1_7_0.StorageController";
+    auto url = crow::utility::urlFromPieces("redfish", "v1", "Systems",
+                                            "system", "Storage", storageId,
+                                            "Controllers", controllerId);
+    asyncResp->res.jsonValue["@odata.id"] = url;
+    asyncResp->res.jsonValue["Name"] = controllerId;
+    asyncResp->res.jsonValue["Id"] = controllerId;
+    asyncResp->res.jsonValue["Status"]["State"] = "Enabled";
+    asyncResp->res.jsonValue["PartLocation"]["LocationType"] = "Embedded";
+    getStorageControllerLocation(asyncResp, connectionName, path, interfaces);
+    populateStorageControllerAttached(asyncResp, path);
+    tryPopulateControllerNvme(asyncResp, path, ifaces);
+    tryPopulateControllerSecurity(asyncResp, url, ifaces);
+    populateWarthogInfo(asyncResp, ifaces, path);
+
+    sdbusplus::asio::getProperty<bool>(
+        *crow::connections::systemBus, connectionName, path,
+        "xyz.openbmc_project.Inventory.Item", "Present",
+        [asyncResp](const boost::system::error_code& ec, bool isPresent) {
+        // this interface isn't necessary, only check it
+        // if we get a good return
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "Failed to get Present property";
+            return;
+        }
+        if (!isPresent)
+        {
+            asyncResp->res.jsonValue["Status"]["State"] = "Absent";
+        }
+        });
+
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, connectionName, path,
+        "xyz.openbmc_project.Inventory.Decorator.Asset",
+        [asyncResp](const boost::system::error_code& ec,
+                    const std::vector<
+                        std::pair<std::string, dbus::utility::DbusVariantType>>&
+                        propertiesList) {
+        getStorageControllerAsset(asyncResp, ec, propertiesList);
+        });
+}
+
 inline void securitySendAction(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& path, const dbus::utility::MapperServiceMap& ifaces,
@@ -2126,56 +2227,6 @@ inline void requestRoutesStorageControllerActions(App& app)
                                    warthogOem["SpiImgSelect"]);
             }
         });
-        });
-}
-
-inline void populateStorageController(
-    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
-    const std::string& storageId, const std::string& controllerId,
-    const std::string& connectionName, const std::string& path,
-    const dbus::utility::MapperServiceMap& ifaces,
-    const std::vector<std::string>& interfaces)
-{
-    asyncResp->res.jsonValue["@odata.type"] =
-        "#StorageController.v1_7_0.StorageController";
-    auto url = crow::utility::urlFromPieces("redfish", "v1", "Systems",
-                                            "system", "Storage", storageId,
-                                            "Controllers", controllerId);
-    asyncResp->res.jsonValue["@odata.id"] = url;
-    asyncResp->res.jsonValue["Name"] = controllerId;
-    asyncResp->res.jsonValue["Id"] = controllerId;
-    asyncResp->res.jsonValue["Status"]["State"] = "Enabled";
-    asyncResp->res.jsonValue["PartLocation"]["LocationType"] = "Embedded";
-    getStorageControllerLocation(asyncResp, connectionName, path, interfaces);
-    tryPopulateControllerNvme(asyncResp, path, ifaces);
-    tryPopulateControllerSecurity(asyncResp, url, ifaces);
-    populateWarthogInfo(asyncResp, ifaces, path);
-
-    sdbusplus::asio::getProperty<bool>(
-        *crow::connections::systemBus, connectionName, path,
-        "xyz.openbmc_project.Inventory.Item", "Present",
-        [asyncResp](const boost::system::error_code& ec, bool isPresent) {
-        // this interface isn't necessary, only check it
-        // if we get a good return
-        if (ec)
-        {
-            BMCWEB_LOG_DEBUG << "Failed to get Present property";
-            return;
-        }
-        if (!isPresent)
-        {
-            asyncResp->res.jsonValue["Status"]["State"] = "Absent";
-        }
-        });
-
-    sdbusplus::asio::getAllProperties(
-        *crow::connections::systemBus, connectionName, path,
-        "xyz.openbmc_project.Inventory.Decorator.Asset",
-        [asyncResp](const boost::system::error_code& ec,
-                    const std::vector<
-                        std::pair<std::string, dbus::utility::DbusVariantType>>&
-                        propertiesList) {
-        getStorageControllerAsset(asyncResp, ec, propertiesList);
         });
 }
 
@@ -3029,19 +3080,14 @@ inline void storageVolumeCollectionHandler(
                                          "Storage", storageId, "Volumes");
         asyncResp->res.jsonValue["Name"] = "Storage Volume Collection";
 
-        constexpr std::array<std::string_view, 1> interfaces = {
-            "xyz.openbmc_project.Inventory.Item.Volume"};
-        dbus::utility::getAssociatedSubTreePaths(
-            storagePath / "containing",
-            sdbusplus::message::object_path("/xyz/openbmc_project/inventory"),
-            0, interfaces,
-            [asyncResp,
-             storageId](const boost::system::error_code& ec,
-                        const dbus::utility::MapperGetSubTreePathsResponse&
-                            volumeList) {
+        storageVolumes(storagePath,
+                       [asyncResp, storageId](
+                           const boost::system::error_code& ec,
+                           const dbus::utility::MapperGetSubTreePathsResponse&
+                               volumeList) {
             populateStorageVolumeCollection(asyncResp, ec, storageId,
                                             volumeList);
-            });
+        });
     });
 }
 
