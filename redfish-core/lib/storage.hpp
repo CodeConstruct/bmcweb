@@ -2346,6 +2346,21 @@ inline void storageControllerCollectionHandler(
                                          "Storage", storageId, "Controllers");
         asyncResp->res.jsonValue["Name"] = "Storage Controller Collection";
 
+        auto& cap = asyncResp->res.jsonValue["@Redfish.CollectionCapabilities"];
+        cap["@odata.type"] =
+            "#CollectionCapabilities.v1_3_0.CollectionCapabilities";
+        auto& cs = cap["Capabilities"];
+        if (!cs.is_array())
+        {
+            cs = nlohmann::json::array_t();
+        }
+        auto& c = cs.emplace_back(nlohmann::json::object_t());
+        c["CapabilitiesObject"]["@odata.id"] = crow::utility::urlFromPieces(
+            "redfish", "v1", "Systems", "system", "Storage", storageId,
+            "Volumes", "Capabilities");
+        c["Links"]["TargetCollection"]["@odata.id"] =
+            asyncResp->res.jsonValue["@odata.id"];
+
         constexpr std::array<std::string_view, 1> interfaces = {
             "xyz.openbmc_project.Inventory.Item.StorageController"};
         dbus::utility::getAssociatedSubTreePaths(
@@ -2651,6 +2666,87 @@ inline void storageVolumeCollectionHandler(
     });
 }
 
+inline std::string lookupRelativePerformance(const std::string& rp)
+{
+    if (rp == "xyz.openbmc_project.Nvme.Storage.RelativePerformance.Best")
+    {
+        return "Best";
+    }
+    else if (rp ==
+             "xyz.openbmc_project.Nvme.Storage.RelativePerformance.Better")
+    {
+        return "Better";
+    }
+    else if (rp == "xyz.openbmc_project.Nvme.Storage.RelativePerformance.Good")
+    {
+        return "Good";
+    }
+    return "Degraded";
+}
+
+inline void storageVolumeCapabilitiesHandler(
+    App& app, const crow::Request& req,
+    const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+    const std::string& systemName, const std::string& storageId)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        BMCWEB_LOG_DEBUG
+            << "Failed to setup Redfish Route for StorageVolume Capabilities";
+        return;
+    }
+    if (systemName != "system")
+    {
+        messages::resourceNotFound(asyncResp->res, "ComputerSystem",
+                                   systemName);
+        BMCWEB_LOG_DEBUG << "Failed to find ComputerSystem of " << systemName;
+        return;
+    }
+
+    findStorage(asyncResp, storageId,
+                [asyncResp,
+                 storageId](const sdbusplus::message::object_path& storagePath,
+                            const std::string service) {
+        sdbusplus::asio::getProperty<
+            std::vector<std::tuple<size_t, size_t, size_t, std::string>>>(
+            *crow::connections::systemBus, service, storagePath,
+            "xyz.openbmc_project.Nvme.Storage", "SupportedFormats",
+            [asyncResp, storageId](
+                const boost::system::error_code& ec,
+                const std::vector<
+                    std::tuple<size_t, size_t, size_t, std::string>>& formats) {
+            if (ec)
+            {
+                messages::internalError(asyncResp->res);
+                return;
+            }
+            asyncResp->res.jsonValue["@odata.type"] = "#Volume.v1_9_0.Volume";
+            auto url = crow::utility::urlFromPieces(
+                "redfish", "v1", "Systems", "system", "Storage", storageId,
+                "Volumes", "Capabilities");
+            asyncResp->res.jsonValue["@odata.id"] = url;
+            asyncResp->res.jsonValue["Id"] = "Capabilities";
+            asyncResp->res.jsonValue["Name"] = "Capabilities for Volumes";
+            auto& nv = asyncResp->res.jsonValue["NVMeNamespaceProperties"];
+            auto& allowable =
+                nv["LBAFormatsSupported@Redfish.AllowableValues"] =
+                    nlohmann::json::array_t();
+            auto& formatDesc = nv["LBAFormats"] = nlohmann::json::array_t();
+
+            for (auto& [index, blockSize, metadataSize, relPerf] : formats)
+            {
+                auto name = std::string("LBAFormat") + std::to_string(index);
+                allowable.emplace_back(name);
+                auto& f = formatDesc.emplace_back(nlohmann::json::object_t());
+                auto rp = lookupRelativePerformance(relPerf);
+                f["LBAFormatType"] = name;
+                f["RelativePerformance"] = rp;
+                f["LBADataSizeBytes"] = blockSize;
+                f["LBAMetadataSizeBytes"] = metadataSize;
+            }
+            });
+    });
+}
 inline void storageControllerHandler(
     App& app, const crow::Request& req,
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
@@ -2711,6 +2807,11 @@ inline void requestRoutesStorageVolumeCollection(App& app)
         .privileges(redfish::privileges::getStorageVolumeCollection)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(storageVolumeCollectionHandler, std::ref(app)));
+    BMCWEB_ROUTE(app,
+                 "/redfish/v1/Systems/<str>/Storage/<str>/Volumes/Capabilities")
+        .privileges(redfish::privileges::getStorageVolumeCollection)
+        .methods(boost::beast::http::verb::get)(
+            std::bind_front(storageVolumeCapabilitiesHandler, std::ref(app)));
 }
 
 inline void requestRoutesStorageVolume(App& app)
