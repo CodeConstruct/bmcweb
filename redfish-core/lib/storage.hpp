@@ -897,6 +897,17 @@ inline void
         });
 }
 
+inline void getDriveErase(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                          const std::string& chassisId,
+                          const std::string& driveName)
+{
+    auto eraseUrl = crow::utility::urlFromPieces(
+        "redfish", "v1", "Chassis", chassisId, "Drives", driveName, "Actions",
+        "Drive.SecureErase");
+    asyncResp->res.jsonValue["Actions"]["#Drive.SecureErase"]["target"] =
+        eraseUrl;
+}
+
 static void addAllDriveInfo(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                             const std::string& driveId,
                             const std::string& connectionName,
@@ -924,6 +935,10 @@ static void addAllDriveInfo(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
         else if (interface == "xyz.openbmc_project.Inventory.Item.Drive")
         {
             driveInterface = true;
+        }
+        else if (interface == "xyz.openbmc_project.Inventory.Item.DriveErase")
+        {
+            getDriveErase(asyncResp, chassisId, driveId);
         }
         else if (interface ==
                  "xyz.openbmc_project.Inventory.Decorator.LocationCode")
@@ -1136,6 +1151,320 @@ inline void
                                driveName);
 }
 
+struct EraseParams
+{
+
+    enum Action
+    {
+        CryptoErase,
+        BlockErase,
+        Overwrite,
+    } action;
+
+    static std::optional<EraseParams>
+        parse(const crow::Request& req,
+              std::shared_ptr<bmcweb::AsyncResp> asyncResp)
+    {
+        // Redfish allows sanitizationType to be defaulted, though we don't
+        // know a good default at present, leave it mandatory.
+        std::string sanitizationType;
+
+        if (!json_util::readJsonAction(req, asyncResp->res, "SanitizationType",
+                                       sanitizationType))
+        {
+            BMCWEB_LOG_DEBUG << "Missing request json parameters";
+            return std::nullopt;
+        }
+
+        Action action;
+        if (sanitizationType == "BlockErase")
+        {
+            action = Action::BlockErase;
+        }
+        else if (sanitizationType == "CryptographicErase")
+        {
+            action = Action::CryptoErase;
+        }
+        else if (sanitizationType == "Overwrite")
+        {
+            // Redfish defines an optional "OverwritePasses" parameter, we
+            // don't handle that at the moment. If the client passes it, the
+            // readJsonAction will fail it.
+            action = Action::Overwrite;
+        }
+        else
+        {
+            messages::actionParameterValueNotInList(
+                asyncResp->res, sanitizationType, "SanitizationType",
+                "Drive.SecureErase");
+            return std::nullopt;
+        }
+
+        return EraseParams{.action = action};
+    }
+
+    std::string actionName() const
+    {
+        switch (action)
+        {
+            case Action::CryptoErase:
+                return "xyz.openbmc_project.Inventory.Item.DriveErase.EraseAction.CryptoErase";
+            case Action::BlockErase:
+                return "xyz.openbmc_project.Inventory.Item.DriveErase.EraseAction.BlockErase";
+            case Action::Overwrite:
+                return "xyz.openbmc_project.Inventory.Item.DriveErase.EraseAction.Overwrite";
+        }
+        return "unreachable";
+    }
+};
+
+inline void eraseTaskUpdate(bool eraseInProgress,
+                            std::shared_ptr<task::TaskData> taskData,
+                            const std::string& connectionName,
+                            const std::string& drivePath)
+{
+    if (eraseInProgress)
+    {
+        // nothing to do
+        return;
+    }
+
+    // has finished, either success or failure
+    taskData->stopMonitor();
+    sdbusplus::asio::getAllProperties(
+        *crow::connections::systemBus, connectionName, drivePath,
+        "xyz.openbmc_project.Inventory.Item.DriveErase",
+        [taskData](const boost::system::error_code& ec,
+                   const std::vector<std::pair<
+                       std::string, dbus::utility::DbusVariantType>>& props) {
+        if (ec)
+        {
+            taskData->messages.emplace_back(messages::internalError());
+            taskData->state = "Exception";
+            taskData->complete(
+                std::move(nlohmann::json()),
+                boost::beast::http::status::internal_server_error);
+            return;
+        }
+
+        std::string errorName;
+        std::string errorDescription;
+
+        const bool success = sdbusplus::unpackPropertiesNoThrow(
+            dbus_utils::UnpackErrorPrinter(), props, "ErrorName", errorName,
+            "ErrorDescription", errorDescription);
+
+        if (!success)
+        {
+            taskData->messages.emplace_back(messages::internalError());
+            taskData->state = "Exception";
+            taskData->complete(
+                std::move(nlohmann::json()),
+                boost::beast::http::status::internal_server_error);
+            return;
+        }
+
+        if (errorName.empty())
+        {
+            // Erase Success
+            taskData->state = "Completed";
+            taskData->percentComplete = 100;
+            taskData->messages.emplace_back(messages::success());
+            taskData->complete();
+        }
+        else
+        {
+            // Erase Failed
+            bmcweb::AsyncResp resp;
+            storageAddDbusError(resp.res, "eraseTaskUpdate", "", errorName,
+                                errorDescription);
+            for (auto& m :
+                 resp.res.jsonValue["error"][messages::messageAnnotation])
+            {
+                taskData->messages.emplace_back(m);
+            }
+            taskData->state = "Exception";
+            taskData->complete(std::move(resp.res.jsonValue),
+                               resp.res.result());
+        }
+        });
+}
+
+inline bool eraseTaskHandler(sdbusplus::message_t& msg,
+                             std::shared_ptr<task::TaskData> taskData,
+                             const std::string& connectionName,
+                             const std::string& drivePath)
+{
+    dbus::utility::DBusPropertiesMap props;
+    std::string iface;
+    msg.read(iface, props);
+
+    if (iface != "xyz.openbmc_project.Inventory.Item.DriveErase")
+    {
+        BMCWEB_LOG_DEBUG << "eraseTaskHandler wrong interface";
+        return !task::completed;
+    }
+
+    std::optional<bool> inProgress;
+    std::optional<double> erasePercentage;
+    sdbusplus::unpackPropertiesNoThrow(dbus_utils::UnpackErrorPrinter(), props,
+                                       "EraseInProgress", inProgress,
+                                       "ErasePercentage", erasePercentage);
+
+    if (erasePercentage)
+    {
+        BMCWEB_LOG_DEBUG << "eraseTaskHandler update erasePercentage "
+                         << *erasePercentage;
+        taskData->percentComplete = static_cast<int>(*erasePercentage);
+    }
+
+    if (inProgress)
+    {
+        BMCWEB_LOG_DEBUG << "eraseTaskHandler update iniProgress "
+                         << *inProgress;
+        eraseTaskUpdate(*inProgress, taskData, connectionName, drivePath);
+    }
+
+    // completion is handled asynchronously so always return !completed
+    return !task::completed;
+}
+
+inline void eraseDrive(const crow::Request& req,
+                       const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                       const std::string& connectionName,
+                       const std::string& drivePath, const EraseParams& params)
+{
+    crow::connections::systemBus->async_method_call(
+        [req, asyncResp, connectionName, drivePath,
+         params](const boost::system::error_code ec,
+                 const sdbusplus::message_t& msg) {
+        // Failure returned from NVMe
+        const ::sd_bus_error* sd_err = msg.get_error();
+        if (sd_err)
+        {
+            storageAddDbusError(asyncResp->res, "Drive Erase", "", sd_err->name,
+                                sd_err->message);
+            return;
+        }
+
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "Erase dbus error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        // success, create the async task
+        BMCWEB_LOG_DEBUG << "erase started";
+        std::shared_ptr<task::TaskData> task = task::TaskData::createTask(
+            [connectionName,
+             drivePath](const boost::system::error_code& err,
+                        sdbusplus::message_t& taskMsg,
+                        const std::shared_ptr<task::TaskData>& taskData) {
+            if (err)
+            {
+                // Internal error in property signal callback?
+                BMCWEB_LOG_ERROR << drivePath << ": Error in task";
+                taskData->messages.emplace_back(messages::internalError());
+                taskData->state = "Cancelled";
+                return task::completed;
+            }
+
+            return eraseTaskHandler(taskMsg, taskData, connectionName,
+                                    drivePath);
+            },
+            "type='signal',interface='org.freedesktop.DBus.Properties',"
+            "member='PropertiesChanged',arg0='xyz.openbmc_project.Inventory.Item.DriveErase',"
+            "path='" +
+                drivePath + "'");
+
+        task->startTimer(std::chrono::minutes(180));
+        task->populateResp(asyncResp->res);
+        task->payload.emplace(req);
+
+        // Erase may have completed prior to Task watching for signals, so poll
+        // once.
+        sdbusplus::asio::getProperty<bool>(
+            *crow::connections::systemBus, connectionName, drivePath,
+            "xyz.openbmc_project.Inventory.Item.DriveErase", "EraseInProgress",
+            [task, connectionName,
+             drivePath](const boost::system::error_code& ec2, bool inProgress) {
+            if (ec2)
+            {
+                BMCWEB_LOG_DEBUG << "erase poll error: " << ec2;
+                return;
+            }
+
+            eraseTaskUpdate(inProgress, task, connectionName, drivePath);
+            });
+        },
+        connectionName, drivePath,
+        "xyz.openbmc_project.Inventory.Item.DriveErase", "Erase",
+        params.actionName());
+}
+
+inline void
+    matchAndEraseDrive(const crow::Request& req,
+                       const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                       const std::vector<std::string>& drivePaths,
+                       const std::string& driveName, const EraseParams& params)
+{
+    // Match the driveName
+    int found = 0;
+    std::string drivePath;
+    for (const std::string& d : drivePaths)
+    {
+        sdbusplus::message::object_path path(d);
+        std::string leaf = path.filename();
+        if (leaf == driveName)
+        {
+            found++;
+            drivePath = d;
+        }
+    }
+
+    if (found > 1)
+    {
+        // Sanity check
+        BMCWEB_LOG_DEBUG << "Multiple drives match name " << driveName;
+        messages::internalError(asyncResp->res);
+        return;
+    }
+    else if (found == 0)
+    {
+        messages::resourceNotFound(asyncResp->res, "#Drive.v1_7_0.Drive",
+                                   driveName);
+        return;
+    }
+
+    // Find the connection
+    constexpr std::array<std::string_view, 1> interfaces = {
+        "xyz.openbmc_project.Inventory.Item.DriveErase"};
+    dbus::utility::getDbusObject(
+        drivePath, interfaces,
+        [req, asyncResp, params,
+         drivePath](const boost::system::error_code& ec,
+                    const dbus::utility::MapperGetObject& services) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "DBUS response error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+
+        if (services.size() != 1)
+        {
+            BMCWEB_LOG_DEBUG << "multiple serviceInterfaces entries";
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        auto connectionName = services.front().first;
+
+        // Perform the erase
+        eraseDrive(req, asyncResp, connectionName, drivePath, params);
+        });
+}
+
 // Find Chassis with chassisId and the Drives associated to it.
 void findChassisDrive(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                       const std::string& chassisId,
@@ -1215,6 +1544,38 @@ inline void
     });
 }
 
+inline void handleDriveSecureErase(crow::App& app, const crow::Request& req,
+                                   std::shared_ptr<bmcweb::AsyncResp> asyncResp,
+                                   const std::string& chassisId,
+                                   const std::string& driveName)
+{
+    if (!redfish::setUpRedfishRoute(app, req, asyncResp))
+    {
+        return;
+    }
+
+    auto p = EraseParams::parse(req, asyncResp);
+    if (!p)
+    {
+        return;
+    }
+    EraseParams params = *p;
+
+    // Find paths of drives associated with the ChassisId
+    findChassisDrive(asyncResp, chassisId,
+                     [req, asyncResp, chassisId, driveName,
+                      params](const boost::system::error_code ec,
+                              const std::vector<std::string>& drivePaths) {
+        if (ec)
+        {
+            BMCWEB_LOG_DEBUG << "DBUS response error " << ec;
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        matchAndEraseDrive(req, asyncResp, drivePaths, driveName, params);
+    });
+}
+
 /**
  * This URL will show the drive interface for the specific drive in the chassis
  */
@@ -1224,6 +1585,12 @@ inline void requestRoutesChassisDriveName(App& app)
         .privileges(redfish::privileges::getChassis)
         .methods(boost::beast::http::verb::get)(
             std::bind_front(handleChassisDriveGet, std::ref(app)));
+
+    BMCWEB_ROUTE(
+        app, "/redfish/v1/Chassis/<str>/Drives/<str>/Actions/Drive.SecureErase")
+        .privileges(redfish::privileges::postDrive)
+        .methods(boost::beast::http::verb::post)(
+            std::bind_front(handleDriveSecureErase, std::ref(app)));
 }
 
 inline void setResetType(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
