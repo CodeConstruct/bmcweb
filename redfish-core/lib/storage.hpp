@@ -1667,16 +1667,28 @@ inline std::optional<std::string>
     matchServiceName(const dbus::utility::MapperServiceMap& allServices,
                      const std::string& matchIface)
 {
-    // TODO(matt): assumes only a single service matches
+    int found = 0;
+    std::string matchService;
     for (const auto& [service, interfaces] : allServices)
     {
         for (const auto& interface : interfaces)
         {
             if (interface == matchIface)
             {
-                return service;
+                matchService = service;
+                found++;
             }
         }
+    }
+
+    if (found == 1)
+    {
+        return matchService;
+    }
+    if (found > 1)
+    {
+        BMCWEB_LOG_DEBUG << "Failed, multiple service names matched for "
+                         << matchIface;
     }
     return {};
 }
