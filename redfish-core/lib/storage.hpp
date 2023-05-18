@@ -892,12 +892,12 @@ inline void
         });
 }
 
-static void
-    addAllDriveInfo(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
-                    const std::string& driveId,
-                    const std::string& connectionName, const std::string& path,
-                    const std::vector<std::string>& interfaces,
-                    const std::optional<std::string> chassisId = std::nullopt)
+static void addAllDriveInfo(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
+                            const std::string& driveId,
+                            const std::string& connectionName,
+                            const std::string& path,
+                            const std::vector<std::string>& interfaces,
+                            const std::string& chassisId)
 {
     bool driveInterface = false;
     bool driveStateInterface = false;
@@ -1127,7 +1127,8 @@ inline void
             });
         return;
     }
-    messages::internalError(asyncResp->res);
+    messages::resourceNotFound(asyncResp->res, "#Drive.v1_7_0.Drive",
+                               driveName);
 }
 
 // Find Chassis with chassisId and the Drives associated to it.
@@ -1153,6 +1154,8 @@ void findChassisDrive(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
         }
 
         // Iterate over all retrieved ObjectPaths.
+        int found = 0;
+        std::string chassisPath;
         for (const auto& [path, connectionNames] : subtree)
         {
             sdbusplus::message::object_path objPath(path);
@@ -1166,10 +1169,22 @@ void findChassisDrive(const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
                 BMCWEB_LOG_ERROR << "Got 0 Connection names";
                 continue;
             }
-
-            dbus::utility::getAssociationEndPoints(path + "/drive", cb);
-            break;
+            found++;
+            chassisPath = path;
         }
+        if (found > 1)
+        {
+            BMCWEB_LOG_ERROR << "Multiple chassis match";
+            messages::internalError(asyncResp->res);
+            return;
+        }
+        else if (found == 0)
+        {
+            messages::resourceNotFound(asyncResp->res,
+                                       "#Chassis.v1_14_0.Chassis", chassisId);
+            return;
+        }
+        dbus::utility::getAssociationEndPoints(chassisPath + "/drive", cb);
         });
 }
 
