@@ -2069,16 +2069,36 @@ inline void tryPopulateControllerNvme(
     const std::shared_ptr<bmcweb::AsyncResp>& asyncResp,
     const std::string& path, const dbus::utility::MapperServiceMap& ifaces)
 {
-    if (!matchServiceName(ifaces, "xyz.openbmc_project.NVMe.NVMeAdmin"))
+    if (matchServiceName(ifaces, "xyz.openbmc_project.NVMe.NVMeAdmin"))
     {
-        return;
+        auto& nvprop = asyncResp->res.jsonValue["NVMeControllerProperties"];
+        // TODO(matt) fetch other properties, don't use hardcoded values
+        nvprop["ControllerType"] = "IO";
+        nvprop["NVMeVersion"] = "1.4";
     }
 
-    auto& nvprop = asyncResp->res.jsonValue["NVMeControllerProperties"];
-    // TODO(matt) fetch other properties, don't use hardcoded values
-    nvprop["ControllerType"] = "IO";
-    nvprop["NVMeVersion"] = "1.4";
-    (void)path;
+    if (auto service = matchServiceName(
+            ifaces, "xyz.openbmc_project.Software.ExtendedVersion"))
+    {
+        sdbusplus::asio::getProperty<std::string>(
+            *crow::connections::systemBus, *service, path,
+            "xyz.openbmc_project.Software.ExtendedVersion", "ExtendedVersion",
+            [asyncResp](const boost::system::error_code& ec,
+                        const std::string& extVers) {
+            if (ec)
+            {
+                return;
+            }
+
+            std::string v(
+                "xyz.openbmc_project.NVMe.ControllerFirmwareVersion:");
+            if (extVers.starts_with(v))
+            {
+                asyncResp->res.jsonValue["FirmwareVersion"] =
+                    extVers.substr(v.size());
+            }
+            });
+    }
 }
 
 inline void tryPopulateControllerSecurity(
