@@ -295,7 +295,11 @@ struct TaskData : std::enable_shared_from_this<TaskData>
     // when handling calling complete() manually too.
     void stopMonitor()
     {
-        match.reset();
+        // Defer reset. This is necessary since stopMonitor() can be called
+        // by the match callback, which is a lambda stored in the match itself.
+        boost::asio::post(
+            crow::connections::systemBus->get_io_context(),
+            [self = shared_from_this()] { self->match.reset(); });
     }
 
     void startTimer(const std::chrono::seconds& timeout)
